@@ -1,0 +1,79 @@
+# ---------------------------------------------------------------------------
+# Secrets — never commit these
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib60/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+
+# Type checking / linting caches
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# ---------------------------------------------------------------------------
+# Node / frontend (apps/web)
+# ---------------------------------------------------------------------------
+node_modules/
+.vite/
+*.local
+
+# ---------------------------------------------------------------------------
+# DeepTrace runtime artifacts
+# ---------------------------------------------------------------------------
+# Local run records before Postgres persistence lands (Phase D)
+data/runs/*.jsonl
+# Cached page extractions and search results used during development
+data/cache/
+# Generated evaluation outputs — results are committed deliberately, not by default
+data/eval_runs/
+*.log
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
