@@ -30,9 +30,16 @@ dependencies = [
     "pydantic>=2.9",          # structured outputs and schema validation
     "pydantic-settings>=2.6", # typed, environment-backed configuration
     "structlog>=24.4",        # structured logging for the trace requirement
+    "google-genai>=1.0",      # Gemini provider adapter (core/llm/gemini.py)
 ]
 
 [project.optional-dependencies]
+# Provider SDKs are optional extras. The core package runs with any one of
+# them, which is what keeps the vendor-neutral interface honest -- installing
+# DeepTrace does not force a particular vendor's SDK into the environment.
+openai = ["openai>=1.50"]
+anthropic = ["anthropic>=0.40"]
+
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",   # the workflow layer is async end to end
