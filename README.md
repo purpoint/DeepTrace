@@ -66,8 +66,7 @@ Report  →  Claim  →  Evidence  →  Source  →  URL
          └── Report Writer
 ```
 
-Full detail in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) *(added in Phase K)* and the
-build plan in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Architecture decision records and full subsystem documentation are added in Phase K.
 
 ---
 
@@ -83,17 +82,13 @@ build plan in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 | Quality | pytest, ruff, evaluation benchmark |
 | Deploy | Docker Compose, GitHub Actions |
 
-Each choice is justified in an Architecture Decision Record under `docs/adr/`.
-
----
-
 ## Project status
 
 Built sequentially. This table reflects what actually works, not what is planned.
 
 | Phase | Scope | Status |
 |---|---|---|
-| A | Foundation, LLM layer, cost + prompt versioning | 🟡 In progress |
+| A | Foundation, LLM layer, cost + prompt versioning | 🟡 In progress — M0 complete |
 | B | Query analyzer, research planner | ⬜ |
 | C | Tools, researcher agent, evidence system | ⬜ |
 | D | PostgreSQL persistence | ⬜ |
@@ -123,11 +118,20 @@ pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-Add your API keys to `.env`, then verify the install:
+Or simply:
 
 ```bash
-pytest
+make setup
 ```
+
+Add your API keys to `.env`, then verify:
+
+```bash
+make check
+```
+
+`deeptrace status` prints the resolved configuration and depth budgets;
+`deeptrace check` reports foundation health and what is still pending.
 
 ---
 
@@ -138,7 +142,6 @@ apps/            FastAPI service, background worker, React frontend
 core/            Agents, workflow graph, tools, prompts, evaluation
 infrastructure/  Database, cache, and queue adapters
 tests/           Unit, integration, workflow, and evaluation tests
-docs/            Roadmap, architecture, ADRs, learning notes
 scripts/         Development and operational scripts
 ```
 

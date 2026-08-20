@@ -70,6 +70,14 @@ data/eval_runs/
 *.log
 
 # ---------------------------------------------------------------------------
+# Local project documentation
+# ---------------------------------------------------------------------------
+# Roadmap and per-milestone learning notes are kept on the developer machine
+# and deliberately not published. Public documentation required by the
+# documentation milestone can be un-ignored individually when it is written.
+docs/
+
+# ---------------------------------------------------------------------------
 # Editors / OS / tooling
 # ---------------------------------------------------------------------------
 .DS_Store
