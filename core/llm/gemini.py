@@ -42,12 +42,95 @@ from core.llm.errors import (
 
 PROVIDER_NAME = "google"
 
-# Models that accept a response schema. Everything else falls back to
-# prompt-level instruction plus validation, which the client layer handles.
-_STRUCTURED_OUTPUT_PREFIXES = ("gemini-2.5", "gemini-2.0", "gemini-1.5")
+# Structured output is supported by the Gemini generative models generally, so
+# capability is derived from the model family rather than an allowlist of
+# version prefixes. A version allowlist silently rots: when the provider
+# releases a new generation, every new model reports "unsupported" and the
+# client quietly degrades to prompt-level JSON instruction plus repair loops,
+# which costs money and is hard to notice.
+_NON_GENERATIVE_MARKERS = ("embedding", "-tts", "-live", "veo-", "lyria-", "imagen")
 
 # Gemini finish reasons that mean the model declined rather than completed.
 _REFUSAL_REASONS = {"SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "RECITATION"}
+
+
+# Gemini accepts a subset of OpenAPI 3.0 schema, not full JSON Schema. Anything
+# outside this set is rejected outright rather than ignored.
+_GEMINI_SCHEMA_KEYS = frozenset(
+    {
+        "type",
+        "format",
+        "description",
+        "nullable",
+        "enum",
+        "items",
+        "properties",
+        "required",
+        "minItems",
+        "maxItems",
+        "minimum",
+        "maximum",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "anyOf",
+    }
+)
+
+
+def to_gemini_schema(schema: dict[str, Any], definitions: dict[str, Any] | None = None) -> Any:
+    """Translate a Pydantic JSON Schema into Gemini's schema dialect.
+
+    Pydantic emits standard JSON Schema. Gemini accepts a restricted OpenAPI 3.0
+    subset and rejects the request outright when it sees anything else, so two
+    transformations are required:
+
+    ``$ref``/``$defs`` are inlined. Pydantic hoists nested models and enums into
+    a definitions block and references them; Gemini has no concept of either.
+
+    Unsupported keywords are dropped. ``additionalProperties`` is the one that
+    bites first, because ``extra="forbid"`` -- which is exactly what stops a
+    model from inventing fields -- is what emits it.
+
+    ``anyOf: [X, null]``, which is how Pydantic expresses an optional field,
+    becomes Gemini's ``nullable`` flag rather than a two-branch union.
+
+    This lives in the provider because it is a vendor quirk. The schema handed
+    in is unchanged, and no caller needs to know Gemini is fussy.
+    """
+    if definitions is None:
+        definitions = schema.get("$defs", {})
+
+    if "$ref" in schema:
+        name = str(schema["$ref"]).rsplit("/", 1)[-1]
+        target = definitions.get(name, {})
+        overrides = {key: value for key, value in schema.items() if key != "$ref"}
+        return to_gemini_schema({**target, **overrides}, definitions)
+
+    # Optional fields arrive as anyOf[X, null]; Gemini spells that `nullable`.
+    variants = schema.get("anyOf")
+    if isinstance(variants, list):
+        non_null = [v for v in variants if v.get("type") != "null"]
+        if len(non_null) == 1 and len(non_null) < len(variants):
+            inner = to_gemini_schema(non_null[0], definitions)
+            if isinstance(inner, dict):
+                inner["nullable"] = True
+            return inner
+
+    result: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key not in _GEMINI_SCHEMA_KEYS:
+            continue
+        if key == "properties" and isinstance(value, dict):
+            result[key] = {name: to_gemini_schema(sub, definitions) for name, sub in value.items()}
+        elif key == "items" and isinstance(value, dict):
+            result[key] = to_gemini_schema(value, definitions)
+        elif key == "anyOf" and isinstance(value, list):
+            result[key] = [to_gemini_schema(v, definitions) for v in value]
+        else:
+            result[key] = value
+
+    return result
 
 
 def _split_system(messages: tuple[Message, ...]) -> tuple[str | None, list[Any]]:
@@ -172,7 +255,10 @@ class GeminiProvider:
         return PROVIDER_NAME
 
     def supports_structured_output(self, model: str) -> bool:
-        return model.startswith(_STRUCTURED_OUTPUT_PREFIXES)
+        lowered = model.lower()
+        if not lowered.startswith(("gemini-", "models/gemini-")):
+            return False
+        return not any(marker in lowered for marker in _NON_GENERATIVE_MARKERS)
 
     def _build_config(self, request: CompletionRequest, system: str | None) -> Any:
         config: dict[str, Any] = {
@@ -191,7 +277,7 @@ class GeminiProvider:
             config["seed"] = request.seed
         if request.response_schema is not None and self.supports_structured_output(request.model):
             config["response_mime_type"] = "application/json"
-            config["response_schema"] = request.response_schema
+            config["response_schema"] = to_gemini_schema(request.response_schema)
 
         return genai_types.GenerateContentConfig(**config)
 

@@ -88,7 +88,7 @@ def gemini_response(
 def request(**kwargs: Any) -> CompletionRequest:
     defaults: dict[str, Any] = {
         "messages": (Message.system("You plan research."), Message.user("Plan for X")),
-        "model": "gemini-2.0-flash",
+        "model": "gemini-3.5-flash-lite",
     }
     defaults.update(kwargs)
     return CompletionRequest(**defaults)
@@ -230,26 +230,26 @@ class TestErrorTranslation:
     def test_status_codes_map_to_typed_errors(
         self, code: int, expected: type[LLMError], retryable: bool
     ) -> None:
-        error = _translate_error(ApiError(code, "boom"), "gemini-2.0-flash")
+        error = _translate_error(ApiError(code, "boom"), "gemini-3.5-flash-lite")
 
         assert isinstance(error, expected)
         assert error.retryable is retryable
         assert error.provider == "google"
 
     def test_timeout_maps_to_a_retryable_error(self) -> None:
-        error = _translate_error(TimeoutError("slow"), "gemini-2.0-flash")
+        error = _translate_error(TimeoutError("slow"), "gemini-3.5-flash-lite")
         assert isinstance(error, LLMTimeoutError)
         assert error.retryable is True
 
     def test_connection_failure_is_retryable(self) -> None:
-        error = _translate_error(ConnectionError("dns"), "gemini-2.0-flash")
+        error = _translate_error(ConnectionError("dns"), "gemini-3.5-flash-lite")
         assert isinstance(error, LLMConnectionError)
         assert error.retryable is True
 
     def test_unknown_failure_is_not_retried(self) -> None:
         """Retrying an unclassified failure risks repeating a request that
         already had an effect or already cost money."""
-        error = _translate_error(ValueError("something odd"), "gemini-2.0-flash")
+        error = _translate_error(ValueError("something odd"), "gemini-3.5-flash-lite")
 
         assert type(error) is LLMError
         assert error.retryable is False
@@ -277,12 +277,24 @@ class TestErrorTranslation:
 
 
 class TestCapabilityReporting:
+    def test_a_future_model_generation_is_still_supported(self) -> None:
+        """Regression test. Capability was once an allowlist of version
+        prefixes, so a new provider generation silently reported
+        "unsupported" and the client degraded to prompt-level JSON with repair
+        loops -- slower, more expensive, and easy to miss."""
+        provider = GeminiProvider(api_key="test", client=stub_client())
+
+        assert provider.supports_structured_output("gemini-9.9-flash") is True
+
     @pytest.mark.parametrize(
         ("model", "supported"),
         [
-            ("gemini-2.0-flash", True),
-            ("gemini-2.5-flash", True),
+            ("gemini-3.5-flash-lite", True),
+            ("gemini-3.7-flash", True),
             ("gemini-1.5-pro", True),
+            ("models/gemini-3.7-flash", True),
+            ("gemini-embedding-001", False),
+            ("veo-3.1-generate-preview", False),
             ("some-other-model", False),
         ],
     )

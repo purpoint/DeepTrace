@@ -71,31 +71,22 @@ def _usd(amount: str) -> Decimal:
 
 PRICING: dict[str, ModelPricing] = {
     # -- Google Gemini -----------------------------------------------------
-    # Rates below are the paid tier. When a run executes on a provider's free
-    # tier the amount actually billed is zero, and these figures are the
-    # paid-tier equivalent -- useful for reporting what a run would cost at
-    # scale. Report which of the two a number represents; they are not the same
-    # claim.
-    "gemini-2.0-flash": ModelPricing(
-        input_per_million=_usd("0.10"),
-        output_per_million=_usd("0.40"),
-    ),
-    "gemini-2.0-flash-lite": ModelPricing(
-        input_per_million=_usd("0.075"),
-        output_per_million=_usd("0.30"),
-    ),
-    "gemini-2.5-flash": ModelPricing(
-        input_per_million=_usd("0.30"),
-        output_per_million=_usd("2.50"),
-    ),
-    "gemini-2.5-pro": ModelPricing(
-        input_per_million=_usd("1.25"),
-        output_per_million=_usd("10.00"),
-    ),
-    "text-embedding-004": ModelPricing(
-        input_per_million=_usd("0"),
-        output_per_million=_usd("0"),
-    ),
+    #
+    # Rates are the paid tier. A run on a provider's free tier bills zero, and
+    # these figures are then the paid-tier equivalent -- useful for reporting
+    # what a run would cost at scale. State which of the two a number
+    # represents; they are not the same claim.
+    #
+    # The models currently routed to (see LLM_MODEL_* in .env) are deliberately
+    # absent until their prices are read off the provider's pricing page and
+    # entered here. Until then estimate_cost returns None and the run log shows
+    # "unknown", which is the correct report for a cost that has not been
+    # verified. Adding a guessed price would silently corrupt every total that
+    # depends on it, including any figure that ends up on a resume.
+    #
+    #   To populate: https://ai.google.dev/gemini-api/docs/pricing
+    #   Then update PRICING_LAST_VERIFIED above.
+    #
     # -- OpenAI ------------------------------------------------------------
     "gpt-4o": ModelPricing(
         input_per_million=_usd("2.50"),

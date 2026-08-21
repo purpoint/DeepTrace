@@ -113,7 +113,7 @@ class Settings(BaseSettings):
     # No agent reads these directly. The provider layer resolves them, which is
     # what keeps agents unaware of which vendor is serving a request.
     llm_provider: str = Field(
-        default="openai",
+        default="google",
         description="Default provider id. Individual agents may override it.",
     )
     openai_api_key: str | None = None
@@ -123,9 +123,9 @@ class Settings(BaseSettings):
     # Model routing. Cheap models handle classification and extraction; strong
     # models handle analysis, verification, and synthesis. Names are configured
     # rather than hardcoded so routing can be retuned without code changes.
-    llm_model_cheap: str = "gpt-4o-mini"
-    llm_model_strong: str = "gpt-4o"
-    llm_model_embed: str = "text-embedding-3-small"
+    llm_model_cheap: str = "gemini-3.5-flash-lite"
+    llm_model_strong: str = "gemini-3.7-flash"
+    llm_model_embed: str = "gemini-embedding-001"
 
     llm_timeout_seconds: float = 60.0
     llm_max_retries: int = 3

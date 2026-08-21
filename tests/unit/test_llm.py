@@ -64,9 +64,9 @@ PLANNER = Prompt(
 
 ROUTER = ModelRouter(
     provider_id="fake",
-    cheap_model="gemini-2.0-flash",
-    strong_model="gemini-2.5-flash",
-    embed_model="text-embedding-004",
+    cheap_model="gemini-3.5-flash-lite",
+    strong_model="gemini-3.7-flash",
+    embed_model="gemini-embedding-001",
 )
 
 VALID_PLAN = '{"objective": "Compare Kafka and RabbitMQ", "tasks": ["architecture"]}'
@@ -325,9 +325,9 @@ class TestModelRouting:
     @pytest.mark.parametrize(
         ("tier", "expected"),
         [
-            (ModelTier.CHEAP, "gemini-2.0-flash"),
-            (ModelTier.STRONG, "gemini-2.5-flash"),
-            (ModelTier.EMBED, "text-embedding-004"),
+            (ModelTier.CHEAP, "gemini-3.5-flash-lite"),
+            (ModelTier.STRONG, "gemini-3.7-flash"),
+            (ModelTier.EMBED, "gemini-embedding-001"),
         ],
     )
     def test_tier_resolves_to_configured_model(self, tier: ModelTier, expected: str) -> None:
@@ -337,14 +337,14 @@ class TestModelRouting:
         """Routing is a property of the prompt, so call sites cannot drift."""
         client, recorder = make_client(VALID_PLAN)
         await client.complete_structured(PLANNER, ResearchPlan, {"question": "q"})
-        assert recorder.agent_runs[0].model == "gemini-2.0-flash"
+        assert recorder.agent_runs[0].model == "gemini-3.5-flash-lite"
 
     async def test_explicit_tier_overrides_the_prompt(self) -> None:
         client, recorder = make_client(VALID_PLAN)
         await client.complete_structured(
             PLANNER, ResearchPlan, {"question": "q"}, tier=ModelTier.STRONG
         )
-        assert recorder.agent_runs[0].model == "gemini-2.5-flash"
+        assert recorder.agent_runs[0].model == "gemini-3.7-flash"
 
 
 class TestRunRecording:
@@ -359,7 +359,7 @@ class TestRunRecording:
         assert run.research_id == "res_1"
         assert run.prompt_name == "planner"
         assert run.prompt_version == "v1"
-        assert run.model == "gemini-2.0-flash"
+        assert run.model == "gemini-3.5-flash-lite"
         assert run.tier == "cheap"
         assert run.input_tokens > 0
         assert run.latency_ms > 0
@@ -382,12 +382,17 @@ class TestRunRecording:
         assert recorder.agent_runs[0].retry_count == 1
 
     async def test_cost_is_computed_from_usage(self) -> None:
-        client, recorder = make_client(VALID_PLAN)
+        """Uses a model that has a recorded price, since the point of this test
+        is the arithmetic rather than the contents of the pricing table."""
+        priced = "gpt-4o-mini"
+        router = ModelRouter("fake", priced, priced, priced)
+        recorder = InMemoryRunRecorder()
+        client = LLMClient(FakeProvider([VALID_PLAN]), router=router, recorder=recorder)
         await client.complete(PLANNER, {"question": "q"})
 
         run = recorder.agent_runs[0]
         expected = estimate_cost(
-            "gemini-2.0-flash",
+            priced,
             TokenUsage(input_tokens=run.input_tokens, output_tokens=run.output_tokens),
         )
         assert run.cost_usd == expected
@@ -441,4 +446,4 @@ class TestProviderConstruction:
 
 
 def _request() -> CompletionRequest:
-    return CompletionRequest(messages=(Message.user("hi"),), model="gemini-2.0-flash")
+    return CompletionRequest(messages=(Message.user("hi"),), model="gemini-3.5-flash-lite")
