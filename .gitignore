@@ -86,3 +86,9 @@ docs/
 .claude/
 *.swp
 *.swo
+
+# ---------------------------------------------------------------------------
+# Alembic
+# ---------------------------------------------------------------------------
+# Migration scripts are tracked; the generated README from `alembic init` is not.
+infrastructure/db/migrations/README
