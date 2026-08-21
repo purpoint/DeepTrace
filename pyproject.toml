@@ -31,6 +31,8 @@ dependencies = [
     "pydantic-settings>=2.6", # typed, environment-backed configuration
     "structlog>=24.4",        # structured logging for the trace requirement
     "google-genai>=1.0",      # Gemini provider adapter (core/llm/gemini.py)
+    "httpx>=0.27",            # async HTTP for the search and fetch tools
+    "selectolax>=0.3",        # fast, deterministic HTML text extraction
 ]
 
 [project.optional-dependencies]
