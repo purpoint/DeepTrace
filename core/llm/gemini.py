@@ -56,6 +56,18 @@ _REFUSAL_REASONS = {"SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "RECITA
 
 # Gemini accepts a subset of OpenAPI 3.0 schema, not full JSON Schema. Anything
 # outside this set is rejected outright rather than ignored.
+#
+# minItems and maxItems are deliberately absent. Gemini accepts them on a
+# top-level array but rejects the whole request when one appears on an array
+# nested inside another array's items -- a list field on a list-of-objects,
+# which is an ordinary shape here (a task's dependencies inside a plan's tasks).
+# Encoding that positional rule would be fragile and would rot the same way a
+# version allowlist does, so the constraint is dropped everywhere.
+#
+# The cost is that the model is no longer told the list bounds, so it may return
+# a list that is too long or too short. Pydantic still enforces the bounds on the
+# way in, and the client's repair loop feeds the violation back for correction.
+# Validation is preserved; only the up-front hint is lost.
 _GEMINI_SCHEMA_KEYS = frozenset(
     {
         "type",
@@ -66,8 +78,6 @@ _GEMINI_SCHEMA_KEYS = frozenset(
         "items",
         "properties",
         "required",
-        "minItems",
-        "maxItems",
         "minimum",
         "maximum",
         "minLength",

@@ -12,6 +12,7 @@ would have.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
@@ -28,7 +29,13 @@ from core.llm.errors import (
     LLMServerError,
     LLMTimeoutError,
 )
-from core.llm.gemini import GeminiProvider, _split_system, _translate_error, _usage_from
+from core.llm.gemini import (
+    GeminiProvider,
+    _split_system,
+    _translate_error,
+    _usage_from,
+    to_gemini_schema,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -274,6 +281,60 @@ class TestErrorTranslation:
         with pytest.raises(LLMContentFilterError) as exc:
             await provider.complete(request())
         assert exc.value.retryable is False
+
+
+class TestSchemaTranslation:
+    """Pydantic emits standard JSON Schema; Gemini accepts a narrower dialect
+    and rejects the whole request rather than ignoring what it does not know."""
+
+    def test_additional_properties_is_removed(self) -> None:
+        """extra="forbid" is what stops a model inventing fields, and it is
+        exactly what emits the keyword Gemini rejects."""
+        translated = to_gemini_schema(
+            {"type": "object", "additionalProperties": False, "properties": {}}
+        )
+        assert "additionalProperties" not in translated
+
+    def test_refs_are_inlined(self) -> None:
+        translated = to_gemini_schema(
+            {
+                "$defs": {"Inner": {"type": "string", "enum": ["a", "b"]}},
+                "type": "object",
+                "properties": {"field": {"$ref": "#/$defs/Inner"}},
+            }
+        )
+        assert translated["properties"]["field"]["enum"] == ["a", "b"]
+        assert "$defs" not in translated
+
+    def test_optional_field_becomes_nullable(self) -> None:
+        """Pydantic spells optional as anyOf[X, null]; Gemini spells it nullable."""
+        translated = to_gemini_schema({"anyOf": [{"type": "string"}, {"type": "null"}]})
+        assert translated["type"] == "string"
+        assert translated["nullable"] is True
+
+    def test_list_bounds_are_dropped(self) -> None:
+        """Regression test. Gemini rejects minItems/maxItems on an array nested
+        inside another array's items -- an ordinary shape here, since a plan is
+        a list of tasks and a task has a list of dependencies. Encoding that
+        positional rule would rot; dropping the keyword everywhere does not.
+        Pydantic still enforces the bounds, so violations reach the repair loop
+        rather than passing through."""
+        translated = to_gemini_schema(
+            {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string"}}
+        )
+
+        assert "minItems" not in translated
+        assert "maxItems" not in translated
+        assert translated["items"] == {"type": "string"}
+
+    def test_real_plan_schema_survives_translation(self) -> None:
+        from core.models.plan import ResearchPlan
+
+        translated = json.dumps(to_gemini_schema(ResearchPlan.model_json_schema()))
+
+        for rejected in ("$ref", "$defs", "additionalProperties", "minItems", "maxItems"):
+            assert rejected not in translated
+        assert "properties" in translated
 
 
 class TestCapabilityReporting:
