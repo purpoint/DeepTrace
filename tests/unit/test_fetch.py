@@ -16,6 +16,12 @@ from core.tools.fetch import extract_page, extract_text, fetch_url
 
 pytestmark = pytest.mark.unit
 
+
+@pytest.fixture(autouse=True)
+def _hermetic_dns(stub_dns: object) -> None:
+    stub_dns()  # type: ignore[operator]
+
+
 # A public address that needs no DNS lookup. No connection is ever made; the
 # mock transport answers every request.
 PUBLIC = "http://1.1.1.1:8080/docs"

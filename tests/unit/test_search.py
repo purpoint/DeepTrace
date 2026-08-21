@@ -28,6 +28,11 @@ from core.tools.search import (
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_dns(stub_dns: object) -> None:
+    stub_dns()  # type: ignore[operator]
+
+
 class StubProvider:
     """A search provider implemented without any vendor SDK."""
 

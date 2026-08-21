@@ -25,6 +25,21 @@ from core.tools.url_guard import (
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_dns(stub_dns: object) -> None:
+    """Resolution is stubbed so the guard's own logic is what is under test.
+
+    IP literals pass through untouched, so every address-based check is still
+    exercised for real. Two names are mapped deliberately: one that resolves to
+    loopback despite looking public, and one that does not resolve at all."""
+    stub_dns(  # type: ignore[operator]
+        {
+            "127.0.0.1.nip.io": "127.0.0.1",
+            "this-domain-should-not-exist-deeptrace-test.invalid": None,
+        }
+    )
+
+
 def assert_blocked(url: str, *, because: str = "") -> URLValidationError:
     with pytest.raises(URLValidationError) as exc:
         validate_url(url)
