@@ -11,9 +11,12 @@ Research commands are added by the milestones that implement them.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
+import textwrap
 
-from core.config import DEPTH_BUDGETS, Settings, get_settings
+from core.config import DEPTH_BUDGETS, ResearchDepth, Settings, get_settings
+from core.llm.pricing import format_cost
 from core.logging import configure_logging, get_logger
 
 __version__ = "0.1.0"
@@ -93,6 +96,103 @@ def _run_check(settings: Settings) -> int:
     return 0
 
 
+def _wrap(text: str, indent: str = "     ") -> str:
+    return textwrap.fill(text, width=92, initial_indent=indent, subsequent_indent=indent)
+
+
+def _run_research(args: argparse.Namespace) -> int:
+    """Run the full pipeline and print a readable trace.
+
+    Prints each stage as it becomes available rather than only the final
+    result, because the point of the system is that a conclusion can be walked
+    back to what produced it.
+    """
+    from core.pipeline import run_research
+
+    depth = ResearchDepth(args.depth)
+    run = asyncio.run(run_research(args.question, depth=depth, max_tasks=args.max_tasks))
+
+    print()
+    print(f"Research {run.research_id}   depth={run.depth.value}   {run.elapsed_seconds}s")
+    print("=" * 94)
+
+    if run.spec is not None:
+        print()
+        print("QUESTION ANALYSIS")
+        print(_wrap(run.spec.normalized_question))
+        print(
+            f"     type: {run.spec.research_type.value}   "
+            f"freshness: {run.spec.time_sensitivity.value}   "
+            f"scope items: {len(run.spec.scope)}"
+        )
+        for item in run.spec.ambiguities:
+            print(_wrap(f"assumed - {item.aspect}: {item.assumption}"))
+
+    if run.plan is not None:
+        print()
+        print(f"PLAN   {run.plan.summary()}")
+        for task in run.plan.tasks:
+            marker = "*" if any(r.task_id == task.id for r in run.task_results) else " "
+            print(f"   {marker} [{task.priority.value:<6}] {task.id}")
+
+    if run.task_results:
+        print()
+        print("RESEARCH")
+        for result in run.task_results:
+            print(f"   {result.summary()}")
+            for source in sorted(
+                result.usable_sources, key=lambda s: s.quality_score, reverse=True
+            )[:5]:
+                print(f"       {source.quality_score:.2f}  {source.summary()}")
+            for url, reason in result.failed_urls[:3]:
+                print(f"       ----  blocked: {url[:52]} ({reason[:40]})")
+
+    if run.evidence_report is not None:
+        report = run.evidence_report
+        print()
+        print(f"EVIDENCE   {report.summary()}")
+        for evidence in sorted(run.evidence, key=lambda e: e.weight, reverse=True)[:8]:
+            print()
+            print(_wrap(f"[{evidence.weight:.2f}] {evidence.claim}", indent="   "))
+            print(_wrap(f'"{evidence.supporting_text[:220]}"', indent="       "))
+            status = evidence.verification.status.value if evidence.verification else "unchecked"
+            print(f"       -> {evidence.source_id} ({status})")
+
+        if report.rejected:
+            print()
+            print("   REJECTED (passage not found in its source)")
+            for claim, reason in report.rejected[:5]:
+                print(_wrap(f"x {claim}", indent="       "))
+                print(_wrap(reason, indent="         "))
+
+        if report.injection_attempts:
+            print()
+            print(f"   prompt injection observed in: {', '.join(report.injection_attempts)}")
+
+    print()
+    print("COST")
+    usage = run.usage
+    for record in usage.agent_runs:
+        print(
+            f"   {record.agent:<22} {record.model:<24} "
+            f"{record.input_tokens:>6} in /{record.output_tokens:>6} out  "
+            f"{record.latency_ms:>7.0f} ms"
+        )
+    print(
+        f"   {'total':<22} {'':<24} {usage.total_tokens():>6} tokens"
+        f"          {format_cost(usage.total_cost())}"
+    )
+    print(f"   tool calls: {len(usage.tool_calls)}")
+
+    if run.error:
+        print()
+        print(f"FAILED: {run.error}")
+        return 1
+
+    print()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="deeptrace",
@@ -103,6 +203,22 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command")
     subcommands.add_parser("status", help="Show resolved configuration and depth budgets")
     subcommands.add_parser("check", help="Verify the foundation is correctly wired")
+
+    research = subcommands.add_parser("research", help="Run the full research pipeline")
+    research.add_argument("question", help="The research question")
+    research.add_argument(
+        "--depth",
+        choices=[d.value for d in ResearchDepth],
+        default=ResearchDepth.STANDARD.value,
+        help="Budget ceilings for the run (default: standard)",
+    )
+    research.add_argument(
+        "--max-tasks",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Research only the first N tasks. Useful for a cheap smoke test.",
+    )
     return parser
 
 
@@ -119,6 +235,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "check":
         return _run_check(settings)
+    if args.command == "research":
+        return _run_research(args)
 
     parser.print_help()
     return 0
