@@ -36,6 +36,8 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0",  # async ORM for durable research state
     "asyncpg>=0.29",          # PostgreSQL driver used by the async engine
     "alembic>=1.13",          # schema migrations
+    "langgraph>=1.0",         # stateful, checkpointed research workflow
+    "langgraph-checkpoint-postgres>=2.0",  # durable checkpoints (brings psycopg3)
 ]
 
 [project.optional-dependencies]
