@@ -1,5 +1,6 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup install lint format typecheck test test-cov check clean run
+.PHONY: help setup install lint format typecheck test test-int test-cov check clean run \
+	db-up db-down db-reset db-revision
 
 VENV   := .venv
 PYTHON := $(VENV)/bin/python
@@ -7,6 +8,7 @@ PIP    := $(VENV)/bin/pip
 RUFF   := $(VENV)/bin/ruff
 MYPY   := $(VENV)/bin/mypy
 PYTEST := $(VENV)/bin/pytest
+ALEMBIC := $(VENV)/bin/alembic
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -32,8 +34,11 @@ format: ## Format code and fix what ruff can fix automatically
 typecheck: ## Run mypy
 	$(MYPY) core apps infrastructure
 
-test: ## Run tests, excluding those that make paid API calls
-	$(PYTEST) -m "not llm"
+test: ## Run unit tests (no database, no network, no paid API calls)
+	$(PYTEST) -m "not llm and not integration"
+
+test-int: ## Run integration tests against PostgreSQL
+	$(PYTEST) -m integration
 
 test-cov: ## Run tests with a coverage report
 	$(PYTEST) -m "not llm" --cov=core --cov=apps --cov=infrastructure --cov-report=term-missing
@@ -43,6 +48,19 @@ check: lint typecheck test ## Run everything CI runs
 
 run: ## Show resolved configuration
 	$(PYTHON) -m core.cli status
+
+db-up: ## Apply all pending migrations
+	$(ALEMBIC) upgrade head
+
+db-down: ## Reverse the most recent migration
+	$(ALEMBIC) downgrade -1
+
+db-reset: ## Drop everything and rebuild from migrations
+	$(ALEMBIC) downgrade base
+	$(ALEMBIC) upgrade head
+
+db-revision: ## Generate a migration from model changes: make db-revision m="what changed"
+	$(ALEMBIC) revision --autogenerate -m "$(m)"
 
 clean: ## Remove caches and build artifacts
 	find . -type d -name __pycache__ -not -path "./$(VENV)/*" -exec rm -rf {} +

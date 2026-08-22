@@ -14,10 +14,14 @@ import argparse
 import asyncio
 import sys
 import textwrap
+from typing import TYPE_CHECKING
 
 from core.config import DEPTH_BUDGETS, ResearchDepth, Settings, get_settings
 from core.llm.pricing import format_cost
 from core.logging import configure_logging, get_logger
+
+if TYPE_CHECKING:
+    from core.pipeline import ResearchRun
 
 __version__ = "0.1.0"
 
@@ -100,6 +104,33 @@ def _wrap(text: str, indent: str = "     ") -> str:
     return textwrap.fill(text, width=92, initial_indent=indent, subsequent_indent=indent)
 
 
+async def _persist(run: ResearchRun) -> str | None:
+    """Save a finished run, returning an error string rather than raising.
+
+    Persistence failing must not discard a run that already completed. The
+    research is done and its results are in memory; losing them because the
+    database was unreachable would be a worse outcome than reporting that they
+    were not stored.
+    """
+    try:
+        from infrastructure.db.engine import session_scope
+        from infrastructure.db.recorder import PostgresRunRecorder
+        from infrastructure.db.repositories.research import ResearchRepository
+
+        async with session_scope() as session:
+            recorder = PostgresRunRecorder(session, research_id=run.research_id)
+            for record in run.usage.agent_runs:
+                recorder.record_agent_run(record)
+            for call in run.usage.tool_calls:
+                recorder.record_tool_call(call)
+
+            await ResearchRepository(session).save_run(run)
+            await recorder.flush()
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
 def _run_research(args: argparse.Namespace) -> int:
     """Run the full pipeline and print a readable trace.
 
@@ -110,7 +141,13 @@ def _run_research(args: argparse.Namespace) -> int:
     from core.pipeline import run_research
 
     depth = ResearchDepth(args.depth)
-    run = asyncio.run(run_research(args.question, depth=depth, max_tasks=args.max_tasks))
+
+    async def execute() -> tuple[ResearchRun, str | None]:
+        result = await run_research(args.question, depth=depth, max_tasks=args.max_tasks)
+        save_error = await _persist(result) if args.save else None
+        return result, save_error
+
+    run, save_error = asyncio.run(execute())
 
     print()
     print(f"Research {run.research_id}   depth={run.depth.value}   {run.elapsed_seconds}s")
@@ -184,6 +221,13 @@ def _run_research(args: argparse.Namespace) -> int:
     )
     print(f"   tool calls: {len(usage.tool_calls)}")
 
+    if args.save:
+        print()
+        if save_error:
+            print(f"   NOT SAVED: {save_error}")
+        else:
+            print(f"   saved to database as {run.research_id}")
+
     if run.error:
         print()
         print(f"FAILED: {run.error}")
@@ -218,6 +262,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help="Research only the first N tasks. Useful for a cheap smoke test.",
+    )
+    research.add_argument(
+        "--save",
+        action="store_true",
+        help="Persist the run to PostgreSQL (requires DATABASE_URL and migrations)",
     )
     return parser
 
