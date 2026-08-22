@@ -25,99 +25,9 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field, model_validator
 
+from core.models.text import content_words, similarity
+
 _TASK_ID = re.compile(r"^[a-z0-9]+(?:[_-][a-z0-9]+)*$")
-_WORD = re.compile(r"[a-z0-9]+")
-
-# Words carrying no topical signal, removed before comparing two task questions.
-_STOPWORDS = frozenset(
-    [
-        "a",
-        "an",
-        "the",
-        "is",
-        "are",
-        "was",
-        "were",
-        "be",
-        "been",
-        "being",
-        "do",
-        "does",
-        "did",
-        "of",
-        "for",
-        "to",
-        "in",
-        "on",
-        "at",
-        "by",
-        "with",
-        "from",
-        "about",
-        "into",
-        "over",
-        "after",
-        "under",
-        "and",
-        "or",
-        "but",
-        "if",
-        "then",
-        "than",
-        "that",
-        "this",
-        "these",
-        "those",
-        "it",
-        "its",
-        "as",
-        "how",
-        "what",
-        "which",
-        "who",
-        "whom",
-        "when",
-        "where",
-        "why",
-        "can",
-        "could",
-        "should",
-        "would",
-        "will",
-        "shall",
-        "may",
-        "might",
-        "must",
-        "have",
-        "has",
-        "had",
-        "between",
-        "across",
-    ]
-)
-
-
-def _stem(word: str) -> str:
-    """Strip a trailing plural so ``messages`` and ``message`` compare equal.
-
-    Deliberately minimal. It exists to solve one specific problem: without it,
-    a genuine duplicate phrased with a plural ("ordering of messages" versus
-    "message ordering") and a legitimate symmetric comparison pair ("Kafka
-    ordering" versus "RabbitMQ ordering") both differ by exactly one token and
-    score identically. No threshold can separate them.
-
-    Stemming resolves it because the differing token is morphological in the
-    first case and semantic in the second: after stemming, the duplicate scores
-    1.0 while the comparison pair is unchanged.
-
-    A full stemmer would be more accurate and much harder to reason about. This
-    handles the case that actually arises in research questions.
-    """
-    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
-        return word[:-1]
-    return word
-
-
 DUPLICATE_SIMILARITY_THRESHOLD = 0.85
 """Jaccard similarity above which two task questions count as duplicates.
 
@@ -209,16 +119,7 @@ class ResearchTask(BaseModel):
 
     def normalized_question(self) -> frozenset[str]:
         """Content words of the question, stemmed, for duplicate comparison."""
-        words = _WORD.findall(self.question.lower())
-        meaningful = frozenset(_stem(word) for word in words if word not in _STOPWORDS)
-        return meaningful or frozenset(_stem(word) for word in words)
-
-
-def _similarity(left: frozenset[str], right: frozenset[str]) -> float:
-    """Jaccard similarity: shared words over total distinct words."""
-    if not left or not right:
-        return 0.0
-    return len(left & right) / len(left | right)
+        return content_words(self.question)
 
 
 class ResearchPlan(BaseModel):
@@ -300,7 +201,7 @@ class ResearchPlan(BaseModel):
         normalized = [(task, task.normalized_question()) for task in self.tasks]
         for index, (task, tokens) in enumerate(normalized):
             for other, other_tokens in normalized[index + 1 :]:
-                score = _similarity(tokens, other_tokens)
+                score = similarity(tokens, other_tokens)
                 if score >= DUPLICATE_SIMILARITY_THRESHOLD:
                     raise ValueError(
                         f"Tasks {task.id!r} and {other.id!r} ask effectively the "

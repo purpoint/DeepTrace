@@ -527,3 +527,101 @@ class TestAnalysisPersistence:
 
         assert stored is not None
         assert stored.analysis is None
+
+
+class TestClaimPersistence:
+    """Claims and their evidence links are the graph a report walks."""
+
+    async def _run_with_claims(self) -> ResearchRun:
+        from core.models.analysis import Analysis, AnalysisReport, Confidence, Finding
+        from core.models.claim import build_claims
+        from core.models.evidence import EvidenceExtractionReport
+
+        run = ResearchRun(
+            research_id="res_claims",
+            question="How does Kafka order records?",
+            depth=ResearchDepth.QUICK,
+        )
+        source = make_source()
+        evidence = make_evidence()
+        run.task_results = [
+            TaskResult(
+                task_id="ordering",
+                question="How are records ordered?",
+                sources=[source],
+                verdict=SufficiencyVerdict.SUFFICIENT,
+                stop_reason="evidence is sufficient",
+                rounds=1,
+            )
+        ]
+        run.evidence_report = EvidenceExtractionReport(evidence=[evidence], sources_processed=1)
+        analysis = Analysis(
+            summary="The evidence describes partition-level ordering guarantees.",
+            findings=[
+                Finding(
+                    statement="Kafka preserves record order within a partition.",
+                    evidence_ids=[evidence.id],
+                    confidence=Confidence.MODERATE,
+                )
+            ],
+        )
+        run.analysis_report = AnalysisReport(analysis=analysis, evidence_considered=1)
+        run.claim_set = build_claims(analysis, [evidence], research_id=run.research_id)
+        return run
+
+    async def test_claims_and_their_links_survive_a_round_trip(
+        self, db_session: AsyncSession
+    ) -> None:
+        run = await self._run_with_claims()
+        repository = ResearchRepository(db_session)
+
+        await repository.save_run(run)
+        stored = await repository.get_claims("res_claims")
+
+        assert len(stored) == 1
+        assert stored[0].text.startswith("Kafka preserves")
+        assert stored[0].status == "proposed"
+
+    async def test_a_claim_can_be_found_from_the_evidence_it_rests_on(
+        self, db_session: AsyncSession
+    ) -> None:
+        """The direction that matters when a source turns out to be wrong: a
+        retracted page has to be traceable to everything built on it."""
+        run = await self._run_with_claims()
+        repository = ResearchRepository(db_session)
+
+        await repository.save_run(run)
+        resting = await repository.claims_resting_on("ev_1")
+
+        assert [claim.id for claim in resting] == [run.claims[0].id]
+
+    async def test_a_claim_whose_evidence_was_not_stored_is_not_written(
+        self, db_session: AsyncSession
+    ) -> None:
+        """An unsupported claim in the database is one query away from appearing
+        in a report as though it had been checked."""
+        from core.models.claim import Claim, EvidenceLink
+
+        run = await self._run_with_claims()
+        run.claim_set.claims.append(  # type: ignore[union-attr]
+            Claim(
+                id="res_claims:find_99",
+                text="A claim resting on evidence that was never stored.",
+                evidence=[EvidenceLink(evidence_id="ev_ghost", source_id="src_ghost")],
+            )
+        )
+        repository = ResearchRepository(db_session)
+
+        await repository.save_run(run)
+        stored = await repository.get_claims("res_claims")
+
+        assert [claim.id for claim in stored] == [run.claims[0].id]
+
+    async def test_deleting_a_run_removes_its_claims(self, db_session: AsyncSession) -> None:
+        run = await self._run_with_claims()
+        repository = ResearchRepository(db_session)
+        await repository.save_run(run)
+
+        await repository.delete_session("res_claims")
+
+        assert await repository.get_claims("res_claims") == []

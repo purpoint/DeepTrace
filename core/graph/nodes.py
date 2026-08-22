@@ -36,6 +36,7 @@ from core.config import DEPTH_BUDGETS, ResearchDepth
 from core.graph.state import ResearchState, ResearchStatus, state_summary
 from core.llm.client import LLMClient
 from core.logging import get_logger
+from core.models.claim import build_claims
 from core.models.plan import ResearchPlan, ResearchTask
 from core.models.query import QuerySpec
 from core.observability.recorder import RunRecorder
@@ -415,14 +416,62 @@ def make_analysis_node(ctx: NodeContext) -> NodeFn:
             }
 
         problems = [f"analysis discarded: {statement}" for statement, _ in report.dropped]
+        return {
+            "analysis": report,
+            "errors": problems,
+            **_advance(ResearchStatus.CLAIMING),
+        }
+
+    return analyse
+
+
+def make_claims_node(ctx: NodeContext) -> NodeFn:  # noqa: ARG001 - symmetry with the others
+    """Turn the analysis into individually checkable claims.
+
+    No model call: the analyst already decided what the evidence supports, and
+    asking a model to restate its own conclusions as claims would add cost,
+    latency, and a second chance to invent something. This node exists as a
+    stage anyway, for two reasons.
+
+    It is where verification will attach. A fact checker rejects, revises, or
+    re-researches individual claims, and that loop needs somewhere to stand that
+    is not inside the analyst.
+
+    And it is a checkpoint boundary. Deriving claims inside the analysis node
+    would mean a crash between the two re-running the analysis, which is a paid
+    call on the strong tier, to redo work that costs nothing.
+    """
+
+    async def derive(state: ResearchState) -> ResearchState:
+        report = state.get("analysis")
+        if report is None:
+            # Not a failure: a run whose analysis never happened has no claims
+            # to derive, and the evidence it collected is still worth keeping.
+            return {**_advance(ResearchStatus.COMPLETED)}
+
+        claims = build_claims(
+            report.analysis,
+            state.get("evidence", []),
+            research_id=state.get("research_id"),
+        )
+        problems = [f"claim rejected: {text}" for text, _ in claims.rejected]
+
+        log.info(
+            "graph.claims_derived",
+            research_id=state.get("research_id"),
+            claims=len(claims.claims),
+            conflicting=len(claims.conflicting_pairs()),
+            merged=sum(claim.merged_from - 1 for claim in claims.claims),
+            rejected=len(claims.rejected),
+        )
         log.info(
             "graph.finished",
             **{**state_summary(state), "status": ResearchStatus.COMPLETED.value},
         )
         return {
-            "analysis": report,
+            "claims": claims,
             "errors": problems,
             **_advance(ResearchStatus.COMPLETED),
         }
 
-    return analyse
+    return derive

@@ -23,10 +23,9 @@ from core.models.plan import (
     ResearchTask,
     SourceRequirement,
     TaskPriority,
-    _similarity,
-    _stem,
 )
 from core.models.query import Ambiguity, QuerySpec
+from core.models.text import similarity, stem
 from core.observability.recorder import InMemoryRunRecorder
 from core.prompts.planner import PLANNER_V1
 from tests.fakes import FakeProvider
@@ -246,7 +245,7 @@ class TestDuplicateDetection:
     def test_stemming_is_what_makes_the_distinction_possible(self) -> None:
         """Without stemming both cases score identically, so no threshold could
         separate them. Regression test for that reasoning."""
-        duplicate = _similarity(
+        duplicate = similarity(
             ResearchTask(
                 id="aa", question="How does Kafka guarantee message ordering?"
             ).normalized_question(),
@@ -254,7 +253,7 @@ class TestDuplicateDetection:
                 id="bb", question="How does Kafka guarantee ordering of messages?"
             ).normalized_question(),
         )
-        symmetric = _similarity(
+        symmetric = similarity(
             ResearchTask(
                 id="aa", question="How does Kafka guarantee message ordering?"
             ).normalized_question(),
@@ -277,7 +276,7 @@ class TestDuplicateDetection:
         ],
     )
     def test_stemmer_is_conservative(self, word: str, expected: str) -> None:
-        assert _stem(word) == expected
+        assert stem(word) == expected
 
     def test_unrelated_tasks_are_not_duplicates(self) -> None:
         plan = build(

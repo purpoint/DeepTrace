@@ -31,6 +31,7 @@ from enum import StrEnum
 from typing import Annotated, Any, TypedDict
 
 from core.models.analysis import AnalysisReport
+from core.models.claim import ClaimSet
 from core.models.evidence import Evidence
 from core.models.plan import ResearchPlan
 from core.models.query import QuerySpec
@@ -47,6 +48,7 @@ class ResearchStatus(StrEnum):
     RESEARCHING = "researching"
     EXTRACTING = "extracting"
     SYNTHESIZING = "synthesizing"
+    CLAIMING = "claiming"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -113,6 +115,13 @@ class ResearchState(TypedDict, total=False):
     five findings from an analysis that discarded ten is a different result from
     five that discarded none."""
 
+    claims: ClaimSet | None
+    """The analysis expressed as individually checkable assertions.
+
+    Held next to the analysis rather than replacing it: the analysis is what was
+    concluded, the claims are what can be verified or rejected one at a time,
+    and a run that loses either loses part of its trace."""
+
     sources_processed: Annotated[int, operator.add]
     sources_failed: Annotated[int, operator.add]
     """Summed rather than replaced, for the same reason the lists are appended:
@@ -163,6 +172,7 @@ def initial_state(
         sources=[],
         evidence=[],
         analysis=None,
+        claims=None,
         rejected=[],
         injection_attempts=[],
         sources_processed=0,
@@ -194,6 +204,7 @@ def state_summary(state: ResearchState) -> dict[str, Any]:
         "sources": len(state.get("sources", [])),
         "evidence": len(state.get("evidence", [])),
         "findings": len(analysis.analysis.findings) if (analysis := state.get("analysis")) else 0,
+        "claims": len(claims.claims) if (claims := state.get("claims")) else 0,
         "rejected": len(state.get("rejected", [])),
         "errors": len(state.get("errors", [])),
     }

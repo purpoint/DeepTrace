@@ -74,6 +74,7 @@ def run_from_state(
         task_results=list(state.get("task_results", [])),
         evidence_report=_extraction_report(state),
         analysis_report=state.get("analysis"),
+        claim_set=state.get("claims"),
         elapsed_seconds=elapsed_seconds,
         error=error,
         usage=usage or InMemoryRunRecorder(),

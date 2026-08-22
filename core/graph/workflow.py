@@ -1,6 +1,6 @@
 """The research workflow graph.
 
-    START -> analyze -> plan -> dispatch -> evidence -> analysis -> END
+    START -> analyze -> plan -> dispatch -> evidence -> analysis -> claims -> END
                                   ^  |
                                   |  +--> research_task (one per task)
                                   +--------------+
@@ -51,6 +51,7 @@ from core.graph.nodes import (
     NodeContext,
     make_analysis_node,
     make_analyze_node,
+    make_claims_node,
     make_dispatch_node,
     make_evidence_node,
     make_plan_node,
@@ -207,6 +208,7 @@ def build_graph(
     graph.add_node("research_task", make_task_node(ctx))  # type: ignore[call-overload]
     graph.add_node("evidence", make_evidence_node(ctx))  # type: ignore[call-overload]
     graph.add_node("analysis", make_analysis_node(ctx))  # type: ignore[call-overload]
+    graph.add_node("claims", make_claims_node(ctx))  # type: ignore[call-overload]
 
     route = make_router(max_iterations)
     graph.add_edge(START, "analyze")
@@ -223,7 +225,8 @@ def build_graph(
     # step execute it a single time.
     graph.add_edge("research_task", "dispatch")
     graph.add_conditional_edges("evidence", route, {"continue": "analysis", "stop": END})
-    graph.add_edge("analysis", END)
+    graph.add_edge("analysis", "claims")
+    graph.add_edge("claims", END)
 
     return graph.compile(checkpointer=checkpointer)
 

@@ -148,8 +148,8 @@ class TestFullRun:
 
         assert final["status"] == ResearchStatus.COMPLETED.value
         # analyze, plan, dispatch, the task, dispatch again to find no wave
-        # left, evidence, analysis.
-        assert final["iteration"] == 7
+        # left, evidence, analysis, claims.
+        assert final["iteration"] == 8
         assert final["spec"] is not None
         assert final["plan"] is not None
         assert len(final["task_results"]) == 1

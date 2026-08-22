@@ -36,6 +36,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    PrimaryKeyConstraint,
     String,
     Text,
 )
@@ -122,6 +123,9 @@ class ResearchSession(Base):
         back_populates="session", cascade="all, delete-orphan"
     )
     evidence: Mapped[list[EvidenceRow]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+    claims: Mapped[list[ClaimRow]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
     agent_runs: Mapped[list[AgentRunRow]] = relationship(
@@ -230,6 +234,85 @@ class EvidenceRow(Base):
 
     session: Mapped[ResearchSession] = relationship(back_populates="evidence")
     source: Mapped[SourceRow] = relationship(back_populates="evidence")
+
+
+class ClaimRow(Base):
+    """One assertion a run is prepared to make.
+
+    Separate from evidence because it is a different kind of thing: evidence is
+    quoted from a page, a claim is asserted by the system. Keeping them apart is
+    what lets a claim be rejected without touching the evidence that suggested
+    it, and lets a piece of evidence outlive a claim that turned out to be an
+    overreach.
+    """
+
+    __tablename__ = "claims"
+    __table_args__ = (
+        # The report's query: the publishable claims of one run, strongest
+        # first. Status leads because the report filters on it before ordering.
+        Index("ix_claims_research_status", "research_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    research_id: Mapped[str] = mapped_column(
+        ForeignKey("research_sessions.id", ondelete="CASCADE"), index=True
+    )
+
+    text: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(String(24), default="finding", index=True)
+    status: Mapped[str] = mapped_column(String(24), default="proposed", index=True)
+    confidence: Mapped[str] = mapped_column(String(16), default="moderate")
+
+    condition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    merged_from: Mapped[int] = mapped_column(Integer, default=1)
+    strength: Mapped[float] = mapped_column(Float, default=0.0, index=True)
+    """Stored rather than recomputed, for the same reason evidence weight is: a
+    report orders by it across a whole run and a computed sort cannot use an
+    index."""
+
+    conflicts_with: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    """Ids of the claims this one contradicts.
+
+    JSON rather than a self-referencing join table. A conflict is a small,
+    symmetric annotation on a pair the analyst already identified, and it is
+    never queried from the other direction -- a table for it would be schema
+    that nothing reads."""
+
+    created_at: Mapped[datetime] = mapped_column(default=_now)
+
+    session: Mapped[ResearchSession] = relationship(back_populates="claims")
+    evidence_links: Mapped[list[ClaimEvidenceRow]] = relationship(
+        back_populates="claim", cascade="all, delete-orphan"
+    )
+
+
+class ClaimEvidenceRow(Base):
+    """The edge between a claim and a passage supporting it.
+
+    A join table rather than a column, because the relation is many to many in
+    both directions and both directions get walked: verification asks what
+    supports a claim, and a retracted source has to be traceable to everything
+    built on top of it. A list of ids on the claim would answer only the first.
+    """
+
+    __tablename__ = "claim_evidence"
+    __table_args__ = (
+        PrimaryKeyConstraint("claim_id", "evidence_id"),
+        # The reverse walk: everything resting on one passage.
+        Index("ix_claim_evidence_evidence", "evidence_id"),
+    )
+
+    claim_id: Mapped[str] = mapped_column(ForeignKey("claims.id", ondelete="CASCADE"))
+    evidence_id: Mapped[str] = mapped_column(ForeignKey("evidence.id", ondelete="CASCADE"))
+    source_id: Mapped[str] = mapped_column(String(64), index=True)
+
+    weight: Mapped[float] = mapped_column(Float, default=0.0)
+    verbatim: Mapped[bool] = mapped_column(Boolean, default=False)
+    """Whether the passage was found word for word in its source. Denormalised
+    onto the edge so a verifier can weigh a claim's support without loading
+    every passage behind it."""
+
+    claim: Mapped[ClaimRow] = relationship(back_populates="evidence_links")
 
 
 class AgentRunRow(Base):

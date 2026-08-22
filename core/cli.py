@@ -322,6 +322,26 @@ def _print_run(
                 print(_wrap(f"x {statement}", indent="       "))
                 print(_wrap(reason, indent="         "))
 
+    if run.claim_set is not None and run.claims:
+        print()
+        print(f"CLAIMS   {run.claim_set.summary()}")
+        for stated in sorted(run.claims, key=lambda item: item.strength, reverse=True):
+            print()
+            print(_wrap(f"{stated.id}  {stated.text}", indent="   "))
+            detail = (
+                f"       {stated.kind.value}/{stated.status.value}  "
+                f"{stated.confidence.value} confidence  "
+                f"strength {stated.strength}  "
+                f"{len(stated.evidence)} evidence"
+            )
+            if stated.merged_from > 1:
+                detail += f"  ({stated.merged_from} merged)"
+            print(detail)
+            if stated.condition:
+                print(_wrap(f"when: {stated.condition}", indent="       "))
+            if stated.conflicts_with:
+                print(f"       conflicts with: {', '.join(stated.conflicts_with)}")
+
     print()
     print("COST")
     usage = run.usage

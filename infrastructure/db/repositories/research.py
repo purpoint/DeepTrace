@@ -27,6 +27,8 @@ from core.models.source import Source
 from core.tools.search import canonical_url
 from infrastructure.db.models import (
     AgentRunRow,
+    ClaimEvidenceRow,
+    ClaimRow,
     EvidenceRow,
     ResearchSession,
     ResearchTaskRow,
@@ -55,7 +57,8 @@ class ResearchRepository:
         await self._upsert_session(run, user_id=user_id)
         await self._save_tasks(run)
         sources = await self._save_sources(run)
-        await self._save_evidence(run, known_sources=sources)
+        kept = await self._save_evidence(run, known_sources=sources)
+        await self._save_claims(run, known_evidence=kept)
         await self.session.flush()
 
         log.info(
@@ -64,6 +67,7 @@ class ResearchRepository:
             sources=len(sources),
             evidence=len(run.evidence),
             findings=len(run.analysis.findings) if run.analysis else 0,
+            claims=len(run.claims),
             failed=run.error is not None,
         )
 
@@ -183,7 +187,7 @@ class ResearchRepository:
         )
         return sources
 
-    async def _save_evidence(self, run: ResearchRun, *, known_sources: list[Source]) -> None:
+    async def _save_evidence(self, run: ResearchRun, *, known_sources: list[Source]) -> set[str]:
         """Write evidence, dropping any whose source was not persisted.
 
         Deduplicating sources can leave a piece of evidence pointing at an id
@@ -193,7 +197,7 @@ class ResearchRepository:
         silently is the failure this project is built to avoid.
         """
         if not run.evidence:
-            return
+            return set()
 
         valid_ids = {source.id for source in known_sources}
         keepable: list[Evidence] = []
@@ -209,7 +213,7 @@ class ResearchRepository:
                 )
 
         if not keepable:
-            return
+            return set()
 
         rows = [
             {
@@ -231,6 +235,80 @@ class ResearchRepository:
         ]
         await self.session.execute(
             insert(EvidenceRow).values(rows).on_conflict_do_nothing(index_elements=["id"])
+        )
+        return {item.id for item in keepable}
+
+    async def _save_claims(self, run: ResearchRun, *, known_evidence: set[str]) -> None:
+        """Write claims and their links to evidence.
+
+        Links are filtered to evidence that was actually written, for the same
+        reason evidence is filtered to persisted sources: the foreign key would
+        reject the row, and a claim whose support cannot be reached is exactly
+        what this schema refuses to hold.
+
+        A claim left with no links is dropped and logged rather than stored
+        unsupported. An unsupported claim in the database is one query away from
+        appearing in a report as though it were checked.
+        """
+        if not run.claims:
+            return
+
+        rows: list[dict[str, Any]] = []
+        link_rows: list[dict[str, Any]] = []
+        for claim in run.claims:
+            links = [link for link in claim.evidence if link.evidence_id in known_evidence]
+            if not links:
+                log.warning(
+                    "research.claim_unsupported",
+                    research_id=run.research_id,
+                    claim_id=claim.id,
+                    evidence=len(claim.evidence),
+                )
+                continue
+
+            rows.append(
+                {
+                    "id": claim.id,
+                    "research_id": run.research_id,
+                    "text": claim.text,
+                    "kind": claim.kind.value,
+                    "status": claim.status.value,
+                    "confidence": claim.confidence.value,
+                    "condition": claim.condition,
+                    "merged_from": claim.merged_from,
+                    "strength": claim.strength,
+                    "conflicts_with": {"claims": claim.conflicts_with},
+                }
+            )
+            link_rows.extend(
+                {
+                    "claim_id": claim.id,
+                    "evidence_id": link.evidence_id,
+                    "source_id": link.source_id,
+                    "weight": link.weight,
+                    "verbatim": link.verbatim,
+                }
+                for link in links
+            )
+
+        if not rows:
+            return
+
+        statement = insert(ClaimRow).values(rows)
+        await self.session.execute(
+            statement.on_conflict_do_update(
+                index_elements=["id"],
+                set_={
+                    key: statement.excluded[key]
+                    for key in rows[0]
+                    if key not in ("id", "research_id", "created_at")
+                },
+            )
+        )
+        await self.session.execute(
+            insert(ClaimEvidenceRow)
+            .values(link_rows)
+            .on_conflict_do_nothing(index_elements=["claim_id", "evidence_id"])
         )
 
     # -- reading -----------------------------------------------------------
@@ -264,6 +342,36 @@ class ResearchRepository:
             select(EvidenceRow)
             .where(EvidenceRow.research_id == research_id)
             .order_by(EvidenceRow.weight.desc())
+        )
+        return list(result.scalars().all())
+
+    async def get_claims(self, research_id: str, *, status: str | None = None) -> list[ClaimRow]:
+        """Claims for a run, strongest first.
+
+        The status filter is what a report uses: it publishes what survived
+        verification and states plainly that the rest did not.
+        """
+        query = (
+            select(ClaimRow)
+            .where(ClaimRow.research_id == research_id)
+            .order_by(ClaimRow.strength.desc())
+        )
+        if status is not None:
+            query = query.where(ClaimRow.status == status)
+        return list((await self.session.execute(query)).scalars().all())
+
+    async def claims_resting_on(self, evidence_id: str) -> list[ClaimRow]:
+        """Every claim built on one piece of evidence.
+
+        The direction that matters when a source turns out to be wrong. Without
+        the join table this question could only be answered by loading every
+        claim and inspecting it.
+        """
+        result = await self.session.execute(
+            select(ClaimRow)
+            .join(ClaimEvidenceRow, ClaimEvidenceRow.claim_id == ClaimRow.id)
+            .where(ClaimEvidenceRow.evidence_id == evidence_id)
+            .order_by(ClaimRow.strength.desc())
         )
         return list(result.scalars().all())
 
