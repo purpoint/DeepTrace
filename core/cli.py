@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from core.config import DEPTH_BUDGETS, ResearchDepth, Settings, get_settings
 from core.llm.pricing import format_cost
 from core.logging import configure_logging, get_logger
+from core.models.report import render_markdown
 
 if TYPE_CHECKING:
     from core.models.run import ResearchRun
@@ -219,6 +220,15 @@ def _print_run(
         f"Research {run.research_id}   depth={run.depth.value}   {run.elapsed_seconds}s{continued}"
     )
     print("=" * 94)
+
+    # The report first. It is what the run was for, and printing the trace
+    # ahead of it would make the trace the product and the answer an appendix.
+    if run.report is not None:
+        print()
+        print(render_markdown(run.report))
+        print("-" * 94)
+        print(f"report: {run.report.summary()}")
+        print("-" * 94)
 
     if run.spec is not None:
         print()

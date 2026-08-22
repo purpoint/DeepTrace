@@ -35,6 +35,7 @@ from core.models.claim import ClaimSet
 from core.models.evidence import Evidence
 from core.models.plan import ResearchPlan
 from core.models.query import QuerySpec
+from core.models.report import Report
 from core.models.research import TaskResult
 from core.models.source import Source
 from core.models.verification import VerificationReport
@@ -51,6 +52,7 @@ class ResearchStatus(StrEnum):
     SYNTHESIZING = "synthesizing"
     CLAIMING = "claiming"
     VERIFYING = "verifying"
+    REPORTING = "reporting"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -131,6 +133,13 @@ class ResearchState(TypedDict, total=False):
     verdict, and this carries the reasoning, the contradicting passages, and the
     questions that would settle what is still open."""
 
+    report: Report | None
+    """The document a reader sees, and what assembling it had to remove.
+
+    The last thing the run produces and the only one most people will read, so
+    it is state like everything else: inspectable, checkpointed, and stored
+    beside the claims it was written from rather than regenerated on demand."""
+
     extracted_source_ids: Annotated[list[str], operator.add]
     """Sources extraction has already read.
 
@@ -207,6 +216,7 @@ def initial_state(
         extracted_source_ids=[],
         verification_loops=0,
         evidence_at_last_loop=0,
+        report=None,
         rejected=[],
         injection_attempts=[],
         sources_processed=0,

@@ -88,6 +88,7 @@ class ClaimKind(StrEnum):
     """
 
     FINDING = "finding"
+    TRADEOFF = "tradeoff"
     RECOMMENDATION = "recommendation"
     POSITION = "position"
 
@@ -144,6 +145,17 @@ class Claim(BaseModel):
         default=1,
         description="How many of the analyst's conclusions collapsed into this claim.",
     )
+    corroborating_publishers: int = Field(
+        default=1,
+        description="Distinct publishers behind this claim, carried from the analysis.",
+    )
+    """Carried rather than recomputed, because a claim knows its sources but not
+    who published them -- and counting sources instead of publishers is how two
+    pages of one vendor's documentation become "multiple sources agree".
+
+    Defaults to one for claims the analyst did not count, which under-claims
+    rather than over-claims: the cautious direction is to leave corroboration
+    unstated, not to invent it."""
 
     @field_validator("text")
     @classmethod
@@ -288,6 +300,9 @@ def _merge(into: Claim, other: Claim) -> Claim:
             "text": text,
             "evidence": evidence,
             "confidence": Confidence.at_most(other.confidence, into.confidence),
+            "corroborating_publishers": max(
+                into.corroborating_publishers, other.corroborating_publishers
+            ),
             "merged_from": into.merged_from + other.merged_from,
             "conflicts_with": sorted({*into.conflicts_with, *other.conflicts_with}),
         }
@@ -330,6 +345,27 @@ def build_claims(
                 text=finding.statement,
                 kind=ClaimKind.FINDING,
                 confidence=finding.confidence,
+                evidence=supporting,
+                corroborating_publishers=max(1, finding.corroborating_domains),
+            )
+        )
+
+    for index, tradeoff in enumerate(analysis.tradeoffs, start=1):
+        supporting = links(tradeoff.evidence_ids)
+        if not supporting:
+            rejected.append((tradeoff.subject, "no evidence resolved for this trade-off"))
+            continue
+        claims.append(
+            Claim(
+                id=_claim_id(research_id, ClaimKind.TRADEOFF, index),
+                # Stated as one sentence because a trade-off is one assertion:
+                # this benefit costs that. Split across two claims, each half
+                # can be verified, published, and read without the other -- which
+                # is how a report ends up recommending a benefit whose cost was
+                # checked separately and left out.
+                text=f"{tradeoff.benefit} At the cost of: {tradeoff.cost}",
+                kind=ClaimKind.TRADEOFF,
+                confidence=Confidence.MODERATE,
                 evidence=supporting,
             )
         )

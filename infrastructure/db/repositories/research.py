@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.logging import get_logger
 from core.models.evidence import Evidence
+from core.models.report import render_markdown
 from core.models.run import ResearchRun
 from core.models.source import Source
 from core.tools.search import canonical_url
@@ -93,6 +94,8 @@ class ResearchRepository:
             "analysis": (
                 run.analysis_report.model_dump(mode="json") if run.analysis_report else None
             ),
+            "report": run.report.model_dump(mode="json") if run.report else None,
+            "report_markdown": render_markdown(run.report) if run.report else None,
             "completed_at": now,
         }
         statement = insert(ResearchSession).values(values)

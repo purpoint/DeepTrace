@@ -60,6 +60,11 @@ CHECKPOINTED_TYPES: tuple[tuple[str, str], ...] = (
     ("core.models.verification", "VerificationReport"),
     ("core.models.verification", "ClaimVerification"),
     ("core.models.verification", "Disposition"),
+    # core.models.report
+    ("core.models.report", "Report"),
+    ("core.models.report", "ReportSection"),
+    ("core.models.report", "Citation"),
+    ("core.models.report", "SectionKind"),
 )
 """Exactly the types permitted to appear in a checkpoint.
 

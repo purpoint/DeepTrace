@@ -112,7 +112,20 @@ VERIFICATION = json.dumps(
     }
 )
 
-HAPPY_PATH = [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS, VERIFICATION]
+REPORT = json.dumps(
+    {
+        "title": "Ordering guarantees in Kafka partitions",
+        "sections": [
+            {
+                "kind": "summary",
+                "body": "Records are appended to a partition in the order they are sent [1].",
+                "claim_ids": [],
+            }
+        ],
+    }
+)
+
+HAPPY_PATH = [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS, VERIFICATION, REPORT]
 
 
 class StubSearch:
@@ -159,8 +172,8 @@ class TestFullRun:
 
         assert final["status"] == ResearchStatus.COMPLETED.value
         # analyze, plan, dispatch, the task, dispatch again to find no wave
-        # left, evidence, analysis, claims, verify.
-        assert final["iteration"] == 9
+        # left, evidence, analysis, claims, verify, report.
+        assert final["iteration"] == 10
         assert final["spec"] is not None
         assert final["plan"] is not None
         assert len(final["task_results"]) == 1
@@ -552,6 +565,7 @@ def make_parallel_ctx(
             "evidence_extractor": EVIDENCE,
             "analyst": ANALYSIS,
             "fact_checker": VERIFICATION,
+            "reporter": REPORT,
         }
     )
     recorder = InMemoryRunRecorder()
@@ -795,6 +809,7 @@ def make_loop_ctx(
             "evidence_extractor": EVIDENCE,
             "analyst": DEEP_ANALYSIS,
             "fact_checker": verdicts[0],
+            "reporter": REPORT,
         }
     )
     recorder = InMemoryRunRecorder()

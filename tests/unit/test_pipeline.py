@@ -136,6 +136,20 @@ VERIFICATION = json.dumps(
 )
 
 
+REPORT = json.dumps(
+    {
+        "title": "Ordering guarantees in Kafka partitions",
+        "sections": [
+            {
+                "kind": "summary",
+                "body": "Records are appended to a partition in the order they are sent [1].",
+                "claim_ids": [],
+            }
+        ],
+    }
+)
+
+
 class WorkerKilled(BaseException):
     """Stands in for the process being killed.
 
@@ -179,7 +193,7 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> InMemoryRunRecorder:
     from tests.fakes import FakeProvider
 
     recorder = InMemoryRunRecorder()
-    responses = [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS, VERIFICATION]
+    responses = [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS, VERIFICATION, REPORT]
 
     def fake_client(settings: object = None, *, recorder: object = None) -> LLMClient:
         return LLMClient(
@@ -240,8 +254,9 @@ class TestPipelineWiring:
         run = await run_research("How does Kafka order records?", settings=configured())
 
         assert run.usage.total_tokens() > 0
-        # analyse, plan, queries, sufficiency, evidence, analysis, verification
-        assert len(run.usage.agent_runs) == 7
+        # analyse, plan, queries, sufficiency, evidence, analysis, verification,
+        # report
+        assert len(run.usage.agent_runs) == 8
         assert run.usage.tool_calls
 
 

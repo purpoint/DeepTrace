@@ -102,6 +102,21 @@ class ResearchSession(Base):
     plan: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     analysis: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    report: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    """The finished report, including its citation table.
+
+    Stored beside the run rather than regenerated on read: it is the output of a
+    paid model call, and a report that changed each time it was viewed would
+    make the citation numbers in someone's notes point somewhere else."""
+
+    report_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The rendered document.
+
+    Denormalised deliberately. Rendering is deterministic, so this is derivable
+    -- but it is what an API returns and a reader downloads, and deriving it on
+    every read means the display format is pinned to whatever the code does
+    today rather than to what the reader was shown."""
     """What the evidence was found to support, with what grounding discarded.
 
     Stored whole, alongside the spec and the plan, rather than exploded into

@@ -21,6 +21,7 @@ from core.models.claim import Claim, ClaimSet
 from core.models.evidence import Evidence, EvidenceExtractionReport
 from core.models.plan import ResearchPlan
 from core.models.query import QuerySpec
+from core.models.report import Report
 from core.models.research import TaskResult
 from core.models.source import Source
 from core.models.verification import VerificationReport
@@ -41,6 +42,7 @@ class ResearchRun:
     analysis_report: AnalysisReport | None = None
     claim_set: ClaimSet | None = None
     verification: VerificationReport | None = None
+    report: Report | None = None
     elapsed_seconds: float = 0.0
     error: str | None = None
     usage: InMemoryRunRecorder = field(default_factory=InMemoryRunRecorder)

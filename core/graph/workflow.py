@@ -1,6 +1,6 @@
 """The research workflow graph.
 
-    START -> analyze -> plan -> dispatch -> evidence -> analysis -> claims -> verify -> END
+    START -> analyze -> plan -> dispatch -> evidence -> analysis -> claims -> verify -> report
                                   ^  |
                                   |  +--> research_task (one per task)
                                   +--------------+
@@ -55,6 +55,7 @@ from core.graph.nodes import (
     make_dispatch_node,
     make_evidence_node,
     make_plan_node,
+    make_report_node,
     make_task_node,
     make_verify_node,
     planned_waves,
@@ -258,11 +259,13 @@ def build_graph(
     # The additional-research loop. Verification extends the plan when a claim
     # could not be settled; routing sends the run back to research if it did,
     # and the same iteration ceiling bounds this cycle as every other path.
+    graph.add_node("report", make_report_node(ctx))  # type: ignore[call-overload]
     graph.add_conditional_edges(
         "verify",
         make_loop_router(max_iterations, ctx.max_tasks),
-        {"research_again": "dispatch", "stop": END},
+        {"research_again": "dispatch", "stop": "report"},
     )
+    graph.add_edge("report", END)
 
     return graph.compile(checkpointer=checkpointer)
 

@@ -32,6 +32,7 @@ from core.agents.evidence import EvidenceAgent
 from core.agents.fact_checker import FactChecker
 from core.agents.planner import ResearchPlanner
 from core.agents.query_analyzer import QueryAnalyzer
+from core.agents.reporter import Reporter
 from core.agents.researcher import ResearchAgent
 from core.config import DEPTH_BUDGETS, ResearchDepth
 from core.graph.state import ResearchState, ResearchStatus, state_summary
@@ -548,15 +549,82 @@ def make_verify_node(ctx: NodeContext) -> NodeFn:
 
         scheduled, research_again = _schedule_follow_ups(state, report.follow_up_questions, ctx)
         if not research_again:
-            log.info(
-                "graph.finished",
-                **{**state_summary(state), "status": ResearchStatus.COMPLETED.value},
-            )
-            return {**update, **scheduled, **_advance(ResearchStatus.COMPLETED)}
+            return {**update, **scheduled, **_advance(ResearchStatus.REPORTING)}
 
         return {**update, **scheduled, **_advance(ResearchStatus.RESEARCHING)}
 
     return verify
+
+
+def make_report_node(ctx: NodeContext) -> NodeFn:
+    """Write the report from the claims that survived verification.
+
+    Last, and deliberately downstream of everything: it is handed claims, and
+    the sources and page text never reach it. A generator that cannot see a
+    rejected page cannot cite one.
+
+    A failed report is not a failed run. The claims, the evidence and the trace
+    are all stored, and they are the expensive part -- so the run keeps them and
+    says the writing failed, rather than discarding a completed research effort
+    because the last call did not return.
+    """
+
+    async def write(state: ResearchState) -> ResearchState:
+        claims = state.get("claims")
+        if claims is None:
+            return {**_advance(ResearchStatus.COMPLETED)}
+
+        spec = state.get("spec")
+        analysis = state.get("analysis")
+
+        try:
+            report = await Reporter(ctx.client).write(
+                claims,
+                question=spec.normalized_question if spec else state["question"],
+                evidence=state.get("evidence", []),
+                sources=state.get("sources", []),
+                spec=spec,
+                task_results=state.get("task_results", []),
+                verification=state.get("verification"),
+                open_questions=[item.question for item in analysis.analysis.open_questions]
+                if analysis
+                else [],
+                research_loops=state.get("verification_loops", 0),
+                research_id=state.get("research_id"),
+            )
+        except Exception as exc:
+            if _interrupted(exc):
+                raise
+            log.warning(
+                "graph.report_failed",
+                research_id=state.get("research_id"),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return {
+                "errors": [f"report: {type(exc).__name__}: {exc}"],
+                **_advance(ResearchStatus.COMPLETED),
+            }
+
+        problems = [
+            f"citation removed, points at nothing: {marker}" for marker in report.unresolved_markers
+        ]
+        problems.extend(
+            f"report referenced an unpublishable claim: {claim_id}"
+            for claim_id in report.unsupported_claim_ids
+        )
+
+        log.info(
+            "graph.finished",
+            **{**state_summary(state), "status": ResearchStatus.COMPLETED.value},
+        )
+        return {
+            "report": report,
+            "errors": problems,
+            **_advance(ResearchStatus.COMPLETED),
+        }
+
+    return write
 
 
 def _schedule_follow_ups(
