@@ -1,9 +1,11 @@
-"""Tests for the walking skeleton.
+"""Tests for the composition root.
 
-The pipeline itself is thin -- it wires four agents together. What is worth
-testing is the wiring: that each stage receives what the previous one produced,
-that a failure partway still returns a usable trace, and that a missing
-credential is discovered before any money is spent.
+The module itself is thin -- it assembles the workflow's dependencies and
+translates its state into a run object. What is worth testing is exactly that:
+that each stage receives what the previous one produced, that a failure partway
+still returns a usable trace, that a missing credential is discovered before any
+money is spent, and that a run stopped halfway resumes where it stopped instead
+of paying again for work it already did.
 """
 
 from __future__ import annotations
@@ -13,11 +15,12 @@ import json
 import pytest
 
 from core.config import Settings
+from core.models.run import ResearchRun
 from core.models.source import SourceType
 from core.observability.recorder import InMemoryRunRecorder
-from core.pipeline import ResearchRun, build_search_provider, run_research
+from core.pipeline import resume_research, run_research
 from core.tools.base import ToolConfigurationError
-from core.tools.search import SearchResult
+from core.tools.search import SearchResult, build_search_provider
 
 pytestmark = pytest.mark.unit
 
@@ -101,6 +104,15 @@ EVIDENCE = json.dumps(
 )
 
 
+class WorkerKilled(BaseException):
+    """Stands in for the process being killed.
+
+    Deliberately not an ``Exception``: every node catches those and records them
+    as a failed stage, which is a different outcome from a run that was
+    interrupted with work still owed.
+    """
+
+
 class StubSearch:
     name = "stub"
 
@@ -130,7 +142,7 @@ def configured(**overrides: object) -> Settings:
 @pytest.fixture
 def wired(monkeypatch: pytest.MonkeyPatch) -> InMemoryRunRecorder:
     """Replace the provider constructors with stubs, leaving the wiring intact."""
-    import core.pipeline as pipeline
+    import core.graph.workflow as workflow
     from core.llm.client import LLMClient, ModelRouter
     from tests.fakes import FakeProvider
 
@@ -149,7 +161,7 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> InMemoryRunRecorder:
     def fake_search(settings: object = None) -> StubSearch:
         return StubSearch()
 
-    monkeypatch.setattr(pipeline, "build_search_provider", fake_search)
+    monkeypatch.setattr(workflow, "build_search_provider", fake_search)
     return recorder
 
 
@@ -204,12 +216,12 @@ class TestFailureHandling:
     async def test_a_failure_returns_a_partial_trace(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An exception loses everything the run had already established. The
         partial trace is what the report and the trace view read from."""
-        import core.pipeline as pipeline
+        import core.graph.workflow as workflow
 
         def explode(settings: object = None) -> object:
             raise ToolConfigurationError("no search key", tool="web_search")
 
-        monkeypatch.setattr(pipeline, "build_search_provider", explode)
+        monkeypatch.setattr(workflow, "build_search_provider", explode)
 
         run = await run_research("anything", settings=configured())
 
@@ -244,3 +256,276 @@ class TestSearchProviderConstruction:
 
     def test_a_configured_key_builds_a_provider(self) -> None:
         assert build_search_provider(configured()).name == "tavily"
+
+
+class TestExtractionOutcomeSurvivesTheGraph:
+    """What extraction rejected has to reach the run object.
+
+    The state carries evidence and rejections in separate keys, because a
+    reducer cannot merge a nested report. If the translation back drops one of
+    them, a run whose passages were mostly fabricated looks identical to a run
+    that simply found little -- and the rejection is the more interesting half.
+    """
+
+    async def test_rejections_reach_the_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import core.graph.workflow as workflow
+        from core.llm.client import LLMClient, ModelRouter
+        from tests.fakes import FakeProvider
+
+        fabricated = json.dumps(
+            {
+                "evidence": [
+                    {
+                        "claim": "Kafka reorders records during compaction.",
+                        "supporting_text": "Compaction rewrites the log in timestamp order.",
+                        "location": "Compaction",
+                        "support_strength": "strong",
+                    }
+                ],
+                "injection_observed": False,
+            }
+        )
+        responses = [SPEC, PLAN, QUERIES, SUFFICIENT, fabricated]
+
+        def fake_client(settings: object = None, *, recorder: object = None) -> LLMClient:
+            return LLMClient(
+                FakeProvider(responses),
+                router=ModelRouter("fake", "cheap-model", "strong-model", "embed-model"),
+                recorder=recorder,  # type: ignore[arg-type]
+            )
+
+        monkeypatch.setattr(LLMClient, "from_settings", staticmethod(fake_client))
+        monkeypatch.setattr(workflow, "build_search_provider", lambda _settings=None: StubSearch())
+
+        run = await run_research("How does Kafka order records?", settings=configured())
+
+        assert run.evidence == []
+        assert run.evidence_report is not None
+        assert run.evidence_report.rejected
+        assert run.evidence_report.sources_processed == 1
+        assert run.succeeded is False
+
+    async def test_a_run_that_never_extracted_has_no_report(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Distinct from extracting nothing. A run that failed while planning
+        never reached the stage, and saying it processed zero sources would
+        claim an outcome it never produced."""
+        import core.graph.workflow as workflow
+
+        monkeypatch.setattr(workflow, "build_search_provider", lambda _settings=None: StubSearch())
+        run = await run_research("anything", settings=configured(google_api_key=None))
+
+        assert run.evidence_report is None
+        assert run.error is not None
+
+
+class TestResume:
+    """What resuming covers, and what it does not.
+
+    A node that fails records the failure and the graph ends -- there is nothing
+    pending, so resuming such a run returns it unchanged rather than retrying the
+    stage. What resume is for is the case a failed stage cannot represent: the
+    process dying mid-run, which leaves the last completed node checkpointed and
+    the next one still owed.
+    """
+
+    async def test_a_killed_run_does_not_repeat_completed_work(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reason for a workflow engine at all: a worker killed after the
+        research step must not pay for those searches a second time."""
+        import core.graph.workflow as workflow
+        from core.agents.evidence import EvidenceAgent
+        from core.graph.workflow import memory_checkpointer
+        from core.llm.client import LLMClient, ModelRouter
+        from tests.fakes import FakeProvider
+
+        searches: list[str] = []
+        stub = StubSearch()
+
+        async def counting_search(query: str, **kwargs: object) -> list[SearchResult]:
+            searches.append(query)
+            return await StubSearch.search(stub, query)
+
+        monkeypatch.setattr(stub, "search", counting_search)
+        monkeypatch.setattr(workflow, "build_search_provider", lambda _settings=None: stub)
+
+        # One provider across both attempts, so the second picks up where the
+        # first stopped rather than replaying the analyzer's response.
+        provider = FakeProvider([SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE])
+
+        def fake_client(settings: object = None, *, recorder: object = None) -> LLMClient:
+            return LLMClient(
+                provider,
+                router=ModelRouter("fake", "cheap-model", "strong-model", "embed-model"),
+                recorder=recorder,  # type: ignore[arg-type]
+            )
+
+        monkeypatch.setattr(LLMClient, "from_settings", staticmethod(fake_client))
+
+        # A BaseException rather than an ordinary exception on purpose: a node
+        # catches Exception and turns it into state, which is a run that failed,
+        # not a run that was interrupted. This is the process being killed.
+        real_extract = EvidenceAgent.extract
+        killed = False
+
+        async def die_once(self: EvidenceAgent, *args: object, **kwargs: object) -> object:
+            nonlocal killed
+            if not killed:
+                killed = True
+                raise WorkerKilled("worker killed")
+            return await real_extract(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(EvidenceAgent, "extract", die_once)
+        saver = memory_checkpointer()
+
+        with pytest.raises(WorkerKilled):
+            await run_research(
+                "How does Kafka order records?",
+                settings=configured(),
+                checkpointer=saver,
+                research_id="res_resume",
+            )
+        assert len(searches) == 1
+
+        second = await resume_research("res_resume", checkpointer=saver, settings=configured())
+
+        assert second.resumed is True
+        assert second.succeeded
+        assert second.research_id == "res_resume"
+        assert len(searches) == 1, "resuming re-ran a search that was already paid for"
+        assert second.spec is not None, "the checkpointed spec was not restored"
+        assert second.task_results, "the checkpointed research was not restored"
+
+    async def test_the_task_limit_comes_from_the_checkpoint(
+        self, wired: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Found live: a run started with --max-tasks 1 was interrupted, and the
+        resume researched all three planned tasks -- the same run, finished
+        under limits it never had."""
+        from core.graph.workflow import load_state, memory_checkpointer
+
+        saver = memory_checkpointer()
+        await run_research(
+            "How does Kafka order records?",
+            settings=configured(),
+            max_tasks=1,
+            checkpointer=saver,
+            research_id="res_limit",
+        )
+
+        state = await load_state(saver, "res_limit")
+        assert state is not None
+        assert state["max_tasks"] == 1
+
+    async def test_resuming_an_unknown_id_is_refused(self) -> None:
+        """Starting a fresh run under an id whose history the caller believes
+        exists would be worse than failing."""
+        from core.graph.workflow import CheckpointNotFound, memory_checkpointer
+
+        with pytest.raises(CheckpointNotFound) as exc:
+            await resume_research("res_nothing", checkpointer=memory_checkpointer())
+
+        assert "res_nothing" in str(exc.value)
+
+    async def test_depth_comes_from_the_checkpoint_not_the_caller(
+        self, wired: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A resume that could change the budget would mean the ceilings a run
+        executed under are not the ones it is recorded as having used."""
+        from core.config import ResearchDepth
+        from core.graph.workflow import load_state, memory_checkpointer
+
+        saver = memory_checkpointer()
+        await run_research(
+            "How does Kafka order records?",
+            settings=configured(),
+            depth=ResearchDepth.QUICK,
+            checkpointer=saver,
+            research_id="res_depth",
+        )
+
+        state = await load_state(saver, "res_depth")
+        assert state is not None
+        assert state["depth"] == ResearchDepth.QUICK.value
+
+
+class TestInterruptionIsNotATraceback:
+    """An outage is an expected outcome, not a bug in DeepTrace.
+
+    Both entry points return the run, so a CLI reports "the provider is down,
+    resume when it is back" rather than printing a stack trace at a user who
+    can do nothing with it.
+    """
+
+    async def test_an_interrupted_run_returns_the_partial_trace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import core.graph.workflow as workflow
+        from core.graph.workflow import memory_checkpointer
+        from core.llm.client import LLMClient, ModelRouter
+        from core.llm.errors import LLMServerError
+        from tests.fakes import FakeProvider
+
+        provider = FakeProvider([SPEC, LLMServerError("503 high demand", provider="google")])
+
+        def fake_client(settings: object = None, *, recorder: object = None) -> LLMClient:
+            return LLMClient(
+                provider,
+                router=ModelRouter("fake", "cheap-model", "strong-model", "embed-model"),
+                recorder=recorder,  # type: ignore[arg-type]
+            )
+
+        monkeypatch.setattr(LLMClient, "from_settings", staticmethod(fake_client))
+        monkeypatch.setattr(workflow, "build_search_provider", lambda _settings=None: StubSearch())
+        saver = memory_checkpointer()
+
+        run = await run_research(
+            "How does Kafka order records?",
+            settings=configured(),
+            checkpointer=saver,
+            research_id="res_interrupted",
+        )
+
+        assert run.error is not None
+        assert "LLMServerError" in run.error
+        assert run.spec is not None, "the stage that completed before the outage was lost"
+
+    async def test_an_interrupted_resume_returns_the_run_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Found live: the provider that was down was still down, and the
+        second attempt printed a traceback instead of a resumable run."""
+        import core.graph.workflow as workflow
+        from core.graph.workflow import memory_checkpointer
+        from core.llm.client import LLMClient, ModelRouter
+        from core.llm.errors import LLMServerError
+        from tests.fakes import FakeProvider
+
+        outage = LLMServerError("503 high demand", provider="google")
+        provider = FakeProvider([SPEC, outage])
+
+        def fake_client(settings: object = None, *, recorder: object = None) -> LLMClient:
+            return LLMClient(
+                provider,
+                router=ModelRouter("fake", "cheap-model", "strong-model", "embed-model"),
+                recorder=recorder,  # type: ignore[arg-type]
+            )
+
+        monkeypatch.setattr(LLMClient, "from_settings", staticmethod(fake_client))
+        monkeypatch.setattr(workflow, "build_search_provider", lambda _settings=None: StubSearch())
+        saver = memory_checkpointer()
+
+        await run_research(
+            "How does Kafka order records?",
+            settings=configured(),
+            checkpointer=saver,
+            research_id="res_still_down",
+        )
+        again = await resume_research("res_still_down", checkpointer=saver, settings=configured())
+
+        assert again.resumed is True
+        assert again.error is not None
+        assert "LLMServerError" in again.error
+        assert again.spec is not None

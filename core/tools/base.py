@@ -40,6 +40,13 @@ class ToolError(Exception):
 
     retryable: bool = False
 
+    transient: bool = False
+    """Whether the provider could not be reached, rather than answering badly.
+
+    The same distinction the LLM errors draw: read by the workflow to tell a
+    step that is still owed from one that failed. A 404 is a fact about that
+    URL; a search provider being down is a fact about right now."""
+
     def __init__(self, message: str, *, tool: str | None = None, retryable: bool | None = None):
         super().__init__(message)
         self.message = message
@@ -50,16 +57,19 @@ class ToolError(Exception):
 
 class ToolTimeoutError(ToolError):
     retryable = True
+    transient = True
 
 
 class ToolRateLimitError(ToolError):
     retryable = True
+    transient = True
 
 
 class ToolUnavailableError(ToolError):
     """The provider is down or unreachable."""
 
     retryable = True
+    transient = True
 
 
 class ToolConfigurationError(ToolError):

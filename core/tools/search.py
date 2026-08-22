@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from core.config import Settings, get_settings
 from core.logging import get_logger
 from core.observability.recorder import RunRecorder
 from core.tools.base import (
@@ -269,3 +270,24 @@ def canonical_url(url: str) -> str:
     path = parts.path.rstrip("/") or "/"
     suffix = f"?{query}" if query else ""
     return f"{parts.scheme}://{host}{path}{suffix}"
+
+
+def build_search_provider(settings: Settings | None = None) -> SearchProvider:
+    """Construct the configured search provider.
+
+    Mirrors ``build_provider`` in the LLM layer: adding a vendor means adding a
+    branch here and a module implementing the protocol, and nothing above this
+    boundary changes.
+
+    It lives beside the providers rather than in whichever module happens to
+    compose a run, so every entry point -- CLI, worker, API -- resolves search
+    the same way instead of each growing its own construction.
+    """
+    settings = settings or get_settings()
+    if not settings.tavily_api_key:
+        raise ToolConfigurationError(
+            "No search provider is configured. Add TAVILY_API_KEY to your .env "
+            "file (see .env.example). A free key is available at tavily.com.",
+            tool="web_search",
+        )
+    return TavilySearchProvider(api_key=settings.tavily_api_key)

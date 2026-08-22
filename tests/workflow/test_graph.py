@@ -117,7 +117,8 @@ def make_ctx(
         **client_kwargs,  # type: ignore[arg-type]
     )
     search = StubSearch()
-    return NodeContext(client=client, search_provider=search), recorder, search
+    ctx = NodeContext(client=client, search_provider=search, recorder=recorder)
+    return ctx, recorder, search
 
 
 class TestFullRun:
@@ -234,6 +235,124 @@ class TestFailureHandling:
 
         assert final["status"] == ResearchStatus.COMPLETED.value
         assert any("task ordering" in problem for problem in final["errors"])
+
+
+class TestInterruptionVersusFailure:
+    """A node distinguishes "this run cannot proceed" from "come back later".
+
+    Found live: a Gemini 503 during planning was recorded as a failed run. The
+    graph stopped on the error, so nothing was left pending, and resuming the
+    run returned the same failure while the question analysis it had already
+    paid for sat in the checkpoint unusable.
+    """
+
+    async def test_a_transient_provider_error_is_not_swallowed(self) -> None:
+        from core.llm.errors import LLMServerError
+
+        ctx, _, _ = make_ctx(SPEC, LLMServerError("503 high demand", provider="google"))
+
+        with pytest.raises(LLMServerError):
+            await run_workflow("q", ctx=ctx)
+
+    async def test_a_permanent_error_is_recorded_as_a_failed_run(self) -> None:
+        """The other half of the rule. Retrying a rejected schema forever would
+        be a loop, not a recovery."""
+        from core.llm.errors import LLMBadRequestError
+
+        ctx, _, _ = make_ctx(SPEC, LLMBadRequestError("schema rejected", provider="google"))
+        final = await run_workflow("q", ctx=ctx)
+
+        assert final["status"] == ResearchStatus.FAILED.value
+        assert "LLMBadRequestError" in str(final["error"])
+        assert final["spec"] is not None, "the completed stage was discarded"
+
+    async def test_an_interrupted_step_is_still_owed_after_the_checkpoint(self) -> None:
+        """What the distinction buys: the interrupted node is pending, so a
+        resume runs it instead of returning the failure again."""
+        from core.graph.workflow import resume_workflow
+        from core.llm.errors import LLMServerError
+
+        ctx, _, _ = make_ctx(SPEC, LLMServerError("503 high demand", provider="google"))
+        saver = memory_checkpointer()
+        app = build_graph(ctx, checkpointer=saver)
+        config = {"configurable": {"thread_id": "res_503"}}
+
+        with pytest.raises(LLMServerError):
+            await app.ainvoke(
+                initial_state(research_id="res_503", question="q", depth="quick"),
+                config=config,
+            )
+
+        assert (await app.aget_state(config)).next == ("plan",)
+
+        recovered, _, _ = make_ctx(PLAN, QUERIES, SUFFICIENT, EVIDENCE)
+        final = await resume_workflow("res_503", ctx=recovered, checkpointer=saver)
+
+        assert final["status"] == ResearchStatus.COMPLETED.value
+        assert len(final["evidence"]) == 1
+
+
+class TestExtractionOutcomeInState:
+    """A rejection is a finding about the run, so it belongs in the state.
+
+    The evidence and the rejections travel in separate keys because a reducer
+    cannot merge a nested report. Both have to arrive, or a run whose passages
+    were fabricated reads as a run that found nothing.
+    """
+
+    async def test_a_fabricated_passage_is_recorded_as_rejected(self) -> None:
+        fabricated = json.dumps(
+            {
+                "evidence": [
+                    {
+                        "claim": "Kafka reorders records during compaction.",
+                        "supporting_text": "Compaction rewrites the log in timestamp order.",
+                        "location": "Compaction",
+                        "support_strength": "strong",
+                    }
+                ],
+                "injection_observed": False,
+            }
+        )
+        ctx, _, _ = make_ctx(SPEC, PLAN, QUERIES, SUFFICIENT, fabricated)
+        final = await run_workflow("q", ctx=ctx)
+
+        assert final["evidence"] == []
+        assert len(final["rejected"]) == 1
+        assert final["sources_processed"] == 1
+        assert final["status"] == ResearchStatus.FAILED.value
+
+    async def test_rejections_survive_a_checkpoint_round_trip(self) -> None:
+        """They are pairs, and msgpack has no tuple of its own. A round trip
+        that flattened them would break the reader that unpacks (claim, reason)
+        -- and only on resume, never on the run that wrote them."""
+        fabricated = json.dumps(
+            {
+                "evidence": [
+                    {
+                        "claim": "Kafka reorders records during compaction.",
+                        "supporting_text": "Compaction rewrites the log in timestamp order.",
+                        "location": "Compaction",
+                        "support_strength": "strong",
+                    }
+                ],
+                "injection_observed": False,
+            }
+        )
+        ctx, _, _ = make_ctx(SPEC, PLAN, QUERIES, SUFFICIENT, fabricated)
+        saver = memory_checkpointer()
+        app = build_graph(ctx, checkpointer=saver)
+        config = {"configurable": {"thread_id": "res_rejected"}}
+
+        await app.ainvoke(
+            initial_state(research_id="res_rejected", question="q", depth="quick"),
+            config=config,
+        )
+        restored = (await app.aget_state(config)).values
+
+        claim, reason = restored["rejected"][0]
+        assert "compaction" in claim.lower()
+        assert reason
 
 
 class TestCheckpointing:

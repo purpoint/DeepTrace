@@ -75,6 +75,12 @@ class ResearchState(TypedDict, total=False):
     research_id: str
     question: str
     depth: str
+    max_tasks: int | None
+    """How many of the plan's tasks to research, or None for all of them.
+
+    A run parameter, so it belongs in the state for the same reason depth does:
+    a resume that took it from its caller would execute the run under limits it
+    was not started with, and record it as having used the ones it was."""
 
     # -- stage outputs -----------------------------------------------------
     spec: QuerySpec | None
@@ -85,6 +91,22 @@ class ResearchState(TypedDict, total=False):
 
     sources: Annotated[list[Source], operator.add]
     evidence: Annotated[list[Evidence], operator.add]
+
+    rejected: Annotated[list[tuple[str, str]], operator.add]
+    """Passages the verifier refused, as (claim, reason).
+
+    Kept in the state rather than only in the extracting node's own return value
+    because a rejection is a finding about the run, not a detail of the step that
+    produced it. A run whose evidence was mostly fabricated and one that found
+    little are different outcomes, and only this distinguishes them."""
+
+    injection_attempts: Annotated[list[str], operator.add]
+    """Domains whose retrieved content addressed the model."""
+
+    sources_processed: Annotated[int, operator.add]
+    sources_failed: Annotated[int, operator.add]
+    """Summed rather than replaced, for the same reason the lists are appended:
+    when extraction eventually runs per task, each writes its own count."""
 
     # -- control -----------------------------------------------------------
     status: str
@@ -100,7 +122,9 @@ class ResearchState(TypedDict, total=False):
     metadata: dict[str, Any]
 
 
-def initial_state(*, research_id: str, question: str, depth: str) -> ResearchState:
+def initial_state(
+    *, research_id: str, question: str, depth: str, max_tasks: int | None = None
+) -> ResearchState:
     """Build the state a run starts from.
 
     Every collection is initialised empty rather than left absent, so a node can
@@ -110,11 +134,16 @@ def initial_state(*, research_id: str, question: str, depth: str) -> ResearchSta
         research_id=research_id,
         question=question,
         depth=depth,
+        max_tasks=max_tasks,
         spec=None,
         plan=None,
         task_results=[],
         sources=[],
         evidence=[],
+        rejected=[],
+        injection_attempts=[],
+        sources_processed=0,
+        sources_failed=0,
         status=ResearchStatus.QUEUED.value,
         iteration=0,
         errors=[],
@@ -139,5 +168,6 @@ def state_summary(state: ResearchState) -> dict[str, Any]:
         "tasks_completed": len(state.get("task_results", [])),
         "sources": len(state.get("sources", [])),
         "evidence": len(state.get("evidence", [])),
+        "rejected": len(state.get("rejected", [])),
         "errors": len(state.get("errors", [])),
     }

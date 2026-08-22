@@ -9,6 +9,18 @@ correct; retrying an authentication failure burns time to arrive at the same
 answer, and retrying a content-filter refusal will never succeed. Encoding this
 on the error itself keeps the decision next to the knowledge, instead of in a
 growing list of exception types at the call site.
+
+:attr:`LLMError.transient` answers a different question, and the two are not the
+same. ``retryable`` asks whether the client should try again *now*, inside its
+own loop. ``transient`` asks whether the request could not be served at all, so
+that trying again *later* is worth doing -- which is what decides whether a
+workflow step is failed or merely owed.
+
+A structured-output failure separates them. It is retryable, because the repair
+loop can plausibly fix a malformed response on the next attempt; it is not
+transient, because the service answered and waiting an hour will not make the
+model's output fit a schema it does not fit. Treating it as transient would turn
+a broken schema into a run that invites resuming forever.
 """
 
 from __future__ import annotations
@@ -25,6 +37,13 @@ class LLMError(Exception):
     """
 
     retryable: bool = False
+
+    transient: bool = False
+    """Whether the request could not be served, rather than being served badly.
+
+    Read by the workflow to tell an interrupted step from a failed one: a step
+    stopped by an unavailable provider is still owed and resumes, while a step
+    that produced an unusable result has failed and is recorded as such."""
 
     def __init__(
         self,
@@ -54,6 +73,7 @@ class LLMTimeoutError(LLMError):
     """
 
     retryable = True
+    transient = True
 
 
 class LLMRateLimitError(LLMError):
@@ -64,6 +84,7 @@ class LLMRateLimitError(LLMError):
     """
 
     retryable = True
+    transient = True
 
     def __init__(
         self,
@@ -81,12 +102,14 @@ class LLMConnectionError(LLMError):
     """The provider could not be reached. Retryable."""
 
     retryable = True
+    transient = True
 
 
 class LLMServerError(LLMError):
     """The provider returned a 5xx response. Retryable."""
 
     retryable = True
+    transient = True
 
 
 class LLMAuthenticationError(LLMError):

@@ -6,11 +6,18 @@ is the graph's job, expressed as edges, so the control flow can be read from the
 graph definition rather than reconstructed from conditionals scattered across
 nodes.
 
-Every node follows the same failure rule. An agent raising must not raise out of
-the node, because an exception escaping the graph loses the state accumulated so
-far, and that state is the trace. Instead the node records the failure in the
-state and lets the graph route on it. A run that fails during evidence extraction
-still has its sources, and those are worth keeping.
+Every node follows the same failure rule, which has two halves.
+
+A *failure* -- this research cannot proceed -- is recorded in the state rather
+than raised, because an exception escaping the graph loses everything the run
+accumulated in memory, and that accumulation is the trace. A run that fails
+during evidence extraction still has its sources, and those are worth keeping.
+
+An *interruption* -- the provider is down, the rate limit is exhausted -- is
+allowed to propagate. Recording it as a failure would end the run: routing stops
+on ``error``, nothing is left pending, and a resume returns the same failure
+while the work already paid for sits in the checkpoint doing nothing. Letting it
+out leaves the step owed, and every completed node is already durable.
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from core.config import ResearchDepth
 from core.graph.state import ResearchState, ResearchStatus, state_summary
 from core.llm.client import LLMClient
 from core.logging import get_logger
+from core.observability.recorder import RunRecorder
 from core.tools.search import SearchProvider
 
 log = get_logger(__name__)
@@ -57,6 +65,13 @@ class NodeContext:
     search_provider: SearchProvider
     depth: ResearchDepth = ResearchDepth.STANDARD
     max_tasks: int | None = None
+    recorder: RunRecorder | None = None
+    """Where tool calls are recorded.
+
+    The LLM client records its own calls because it was built with this
+    recorder; the research agent has to be handed it explicitly, and a node that
+    forgot to would produce a run whose searches and fetches are missing from
+    the trace while its model calls are all present."""
 
 
 def _advance(state: ResearchState, status: ResearchStatus) -> ResearchState:
@@ -69,11 +84,40 @@ def _advance(state: ResearchState, status: ResearchStatus) -> ResearchState:
     return {"status": status.value, "iteration": state.get("iteration", 0) + 1}
 
 
+def _interrupted(exc: Exception) -> bool:
+    """Whether the infrastructure stopped this node, rather than the run failing.
+
+    Both error taxonomies carry ``transient``: the request could not be served
+    at all, as opposed to being served and answering badly. Reaching a node means
+    the client already exhausted its own retries, so a transient error here says
+    the provider is unavailable now, not that this research cannot be done.
+
+    Deliberately not ``retryable``, which asks a different question -- whether to
+    try again immediately, inside the client's own loop. A structured-output
+    failure is retryable and not transient: waiting will not make a model's
+    output fit a schema it does not fit, and treating it as an interruption
+    would turn a broken schema into a run that invites resuming forever.
+
+    The distinction only started mattering once state was checkpointed. Recording
+    such an error as a failure ends the run: the graph routes on ``error`` and
+    stops, leaving nothing pending, so resuming returns the failure unchanged
+    while the work already paid for sits in the checkpoint unusable. Letting it
+    propagate leaves the step owed, and every completed node is already durable.
+
+    Found by a live run: a Gemini 503 during planning ended a run whose question
+    analysis had already been paid for, and resuming it did nothing at all.
+    """
+    return bool(getattr(exc, "transient", False))
+
+
 def _failed(state: ResearchState, stage: str, exc: Exception) -> ResearchState:
     """Record a failure in the state instead of raising it.
 
-    An exception escaping a node loses everything the run accumulated, and that
-    accumulation is the trace. The graph routes on ``error`` instead.
+    An exception escaping a node loses everything the run accumulated in memory,
+    and that accumulation is the trace. The graph routes on ``error`` instead.
+
+    For failures only. An interruption is re-raised at the call site -- see
+    :func:`_interrupted`.
     """
     message = f"{type(exc).__name__}: {exc}"
     log.warning(
@@ -101,6 +145,10 @@ def make_analyze_node(ctx: NodeContext) -> NodeFn:
                 research_id=state.get("research_id"),
             )
         except Exception as exc:
+            if _interrupted(exc):
+                # Leaves the step owed so a resume retries it, instead of
+                # burying a temporary outage as a permanent failure.
+                raise
             return _failed(state, "analyze", exc)
 
         return {"spec": spec, **_advance(state, ResearchStatus.PLANNING)}
@@ -121,6 +169,10 @@ def make_plan_node(ctx: NodeContext) -> NodeFn:
                 spec, depth=ctx.depth, research_id=state.get("research_id")
             )
         except Exception as exc:
+            if _interrupted(exc):
+                # Leaves the step owed so a resume retries it, instead of
+                # burying a temporary outage as a permanent failure.
+                raise
             return _failed(state, "plan", exc)
 
         return {"plan": research_plan, **_advance(state, ResearchStatus.RESEARCHING)}
@@ -144,7 +196,7 @@ def make_research_node(ctx: NodeContext) -> NodeFn:
         tasks = (
             research_plan.tasks if ctx.max_tasks is None else research_plan.tasks[: ctx.max_tasks]
         )
-        agent = ResearchAgent(ctx.client, ctx.search_provider)
+        agent = ResearchAgent(ctx.client, ctx.search_provider, recorder=ctx.recorder)
 
         results = []
         sources = []
@@ -186,6 +238,10 @@ def make_evidence_node(ctx: NodeContext) -> NodeFn:
                 sources, question=question, research_id=state.get("research_id")
             )
         except Exception as exc:
+            if _interrupted(exc):
+                # Leaves the step owed so a resume retries it, instead of
+                # burying a temporary outage as a permanent failure.
+                raise
             return _failed(state, "evidence", exc)
 
         problems = [f"rejected: {claim}" for claim, _ in report.rejected]
@@ -205,6 +261,10 @@ def make_evidence_node(ctx: NodeContext) -> NodeFn:
         status = ResearchStatus.FAILED if produced_nothing else ResearchStatus.COMPLETED
         update: ResearchState = {
             "evidence": report.evidence,
+            "rejected": report.rejected,
+            "injection_attempts": report.injection_attempts,
+            "sources_processed": report.sources_processed,
+            "sources_failed": report.sources_failed,
             "errors": problems,
             **_advance(state, status),
         }

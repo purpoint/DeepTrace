@@ -40,7 +40,7 @@ from core.graph.state import ResearchState, ResearchStatus, initial_state
 from core.llm.client import LLMClient
 from core.logging import bind_research_context, clear_research_context, get_logger
 from core.observability.recorder import RunRecorder, new_run_id
-from core.tools.search import SearchProvider
+from core.tools.search import SearchProvider, build_search_provider
 
 log = get_logger(__name__)
 
@@ -140,13 +140,12 @@ def build_context(
 ) -> NodeContext:
     """Build node dependencies from configuration."""
     settings = settings or get_settings()
-    from core.pipeline import build_search_provider
-
     return NodeContext(
         client=LLMClient.from_settings(settings, recorder=recorder),
         search_provider=search_provider or build_search_provider(settings),
         depth=depth,
         max_tasks=max_tasks,
+        recorder=recorder,
     )
 
 
@@ -172,19 +171,121 @@ async def run_workflow(
     try:
         log.info("graph.started", research_id=research_id, question=question[:200])
         final: ResearchState = await app.ainvoke(
-            initial_state(research_id=research_id, question=question, depth=depth.value),
+            initial_state(
+                research_id=research_id,
+                question=question,
+                depth=depth.value,
+                max_tasks=ctx.max_tasks,
+            ),
             config={"configurable": {"thread_id": research_id}},
         )
     finally:
         clear_research_context()
 
+    return _finalise(final)
+
+
+def _finalise(final: ResearchState) -> ResearchState:
+    """Give a run that stopped early an honest terminal status.
+
+    Reached when routing stopped the graph -- an iteration ceiling, or a failure
+    recorded without a status change. Left explicit rather than inferred, so a
+    run never ends sitting in a status that says it is still working.
+    """
     if final.get("status") not in (
         ResearchStatus.COMPLETED.value,
         ResearchStatus.FAILED.value,
     ):
-        # Reached only when routing stopped early -- an iteration ceiling or a
-        # failure recorded without a status change. Left explicit rather than
-        # inferred, so a run never ends in a status that says it is still working.
         final["status"] = ResearchStatus.FAILED.value
-
     return final
+
+
+class RunAlreadyCheckpointed(ValueError):
+    """Raised when a new run is started under an id that already has state.
+
+    Invoking a thread that already exists does not start over. LangGraph merges
+    the input into the saved state, and the reducers append -- so a second run
+    under the same id produces one run holding both runs' sources, both runs'
+    task results, and evidence extracted from the union of them, with nothing
+    anywhere saying that happened.
+
+    Ids from :func:`new_run_id` never collide, so reaching this means a caller
+    supplied an id deliberately. Refusing is the only answer that cannot corrupt
+    the earlier run: continuing it is what ``resume`` is for, and that is a
+    different verb.
+    """
+
+    def __init__(self, research_id: str) -> None:
+        super().__init__(
+            f"{research_id} already has checkpointed state. Starting a run under "
+            f"an existing id would merge the two. Resume it, or use a new id."
+        )
+        self.research_id = research_id
+
+
+class CheckpointNotFound(LookupError):
+    """Raised when a run is resumed but nothing was ever checkpointed for it.
+
+    Distinct from a run that failed: there is no state to continue from, so
+    resuming would silently start a fresh run under an id whose history the
+    caller believes already exists.
+    """
+
+    def __init__(self, research_id: str) -> None:
+        super().__init__(
+            f"No checkpoint exists for {research_id}. Either the id is wrong, or "
+            f"the run was executed without a checkpointer and left nothing to resume."
+        )
+        self.research_id = research_id
+
+
+async def load_state(checkpointer: Any, research_id: str) -> ResearchState | None:
+    """Read a run's last checkpointed state without executing anything.
+
+    Read from the checkpointer directly rather than through a compiled graph,
+    because building the graph needs the depth and the search provider that this
+    state is what tells us. It is also what "inspect a run in flight" will be
+    built on: the state is the progress, so answering "where is this research
+    now" is a read, not an inference from log lines.
+    """
+    config = {"configurable": {"thread_id": research_id}}
+    saved = await checkpointer.aget_tuple(config)
+    if saved is None:
+        return None
+
+    values: ResearchState = saved.checkpoint.get("channel_values", {})
+    return values
+
+
+async def resume_workflow(
+    research_id: str,
+    *,
+    ctx: NodeContext,
+    max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    checkpointer: Any,
+) -> ResearchState:
+    """Continue a checkpointed run from wherever it stopped.
+
+    Invoking with ``None`` as the input is what tells LangGraph to continue the
+    saved thread rather than start a new one. There is deliberately no separate
+    resume path through the graph: the same nodes and the same routing run, so a
+    resumed run cannot behave differently from one that never stopped.
+    """
+    if await load_state(checkpointer, research_id) is None:
+        # Checked against the checkpointer rather than the compiled graph:
+        # ``aget_state`` answers with an empty snapshot for a thread that was
+        # never written, so resuming an unknown id would quietly start a fresh
+        # run under an id whose history the caller believes already exists.
+        raise CheckpointNotFound(research_id)
+
+    app = build_graph(ctx, max_iterations=max_iterations, checkpointer=checkpointer)
+    config: Any = {"configurable": {"thread_id": research_id}}
+
+    bind_research_context(research_id=research_id, depth=ctx.depth.value)
+    try:
+        log.info("graph.resumed", research_id=research_id)
+        final: ResearchState = await app.ainvoke(None, config=config)
+    finally:
+        clear_research_context()
+
+    return _finalise(final)

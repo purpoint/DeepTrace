@@ -23,6 +23,7 @@ from core.llm.client import LLMClient
 from core.logging import get_logger
 from core.models.evidence import (
     Evidence,
+    EvidenceExtractionReport,
     QuoteStatus,
     SupportStrength,
     verify_quotation,
@@ -67,44 +68,6 @@ class ExtractionResult(BaseModel):
         default=False,
         description="Whether the document contained text addressed to the reader.",
     )
-
-
-class EvidenceExtractionReport(BaseModel):
-    """What extraction produced, including what it rejected.
-
-    Rejections are reported rather than dropped. If a source yields three
-    fabricated passages, that is a fact about the run worth surfacing, and a
-    silent filter would hide it.
-    """
-
-    model_config = {"extra": "forbid"}
-
-    evidence: list[Evidence] = Field(default_factory=list)
-    rejected: list[tuple[str, str]] = Field(
-        default_factory=list,
-        description="Discarded passages, as (claim, reason).",
-    )
-    sources_processed: int = 0
-    sources_failed: int = 0
-    injection_attempts: list[str] = Field(
-        default_factory=list, description="Domains whose content addressed the model."
-    )
-
-    @property
-    def verified_evidence(self) -> list[Evidence]:
-        """Evidence whose passage was found verbatim in its source."""
-        return [item for item in self.evidence if item.is_verified]
-
-    @property
-    def rejection_rate(self) -> float:
-        total = len(self.evidence) + len(self.rejected)
-        return round(len(self.rejected) / total, 3) if total else 0.0
-
-    def summary(self) -> str:
-        return (
-            f"{len(self.evidence)} evidence ({len(self.verified_evidence)} verbatim) "
-            f"from {self.sources_processed} sources, {len(self.rejected)} rejected"
-        )
 
 
 class EvidenceAgent:

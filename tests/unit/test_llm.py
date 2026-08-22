@@ -166,6 +166,36 @@ class TestRetryClassification:
     def test_retryable_flag(self, error: LLMError, expected: bool) -> None:
         assert error.retryable is expected
 
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (LLMTimeoutError("t"), True),
+            (LLMRateLimitError("r"), True),
+            (LLMServerError("s"), True),
+            (LLMAuthenticationError("a"), False),
+            (LLMBadRequestError("b"), False),
+            (LLMContentFilterError("c"), False),
+        ],
+    )
+    def test_transient_flag(self, error: LLMError, expected: bool) -> None:
+        """A second question, asked by the workflow: was the request served at
+        all? A step stopped by an unavailable provider is owed, not failed."""
+        assert error.transient is expected
+
+    def test_a_structured_output_failure_is_retryable_but_not_transient(self) -> None:
+        """The case that separates the two flags, and the reason there are two.
+
+        The repair loop can plausibly fix a malformed response on the next
+        attempt, so it is retryable. Waiting an hour will not make a model's
+        output fit a schema it does not fit, so it is not transient -- and
+        treating it as one would turn a broken schema into a run that invites
+        resuming forever.
+        """
+        error = StructuredOutputError("did not validate")
+
+        assert error.retryable is True
+        assert error.transient is False
+
     async def test_non_retryable_error_fails_immediately(self) -> None:
         """Retrying a rejected API key wastes time reaching the same answer."""
         provider = FakeProvider([LLMAuthenticationError("bad key")])

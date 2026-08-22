@@ -88,11 +88,11 @@ Built sequentially. This table reflects what actually works, not what is planned
 
 | Phase | Scope | Status |
 |---|---|---|
-| A | Foundation, LLM layer, cost + prompt versioning | 🟡 In progress — M0 complete |
-| B | Query analyzer, research planner | ⬜ |
-| C | Tools, researcher agent, evidence system | ⬜ |
-| D | PostgreSQL persistence | ⬜ |
-| E | LangGraph workflow, parallel research | ⬜ |
+| A | Foundation, LLM layer, cost + prompt versioning | ✅ |
+| B | Query analyzer, research planner | ✅ |
+| C | Tools, researcher agent, evidence system | ✅ |
+| D | PostgreSQL persistence | ✅ |
+| E | LangGraph workflow, parallel research | 🟡 In progress — workflow and resumable runs complete |
 | F | Analyst, claims, fact checker | ⬜ |
 | G | Report generation, citations | ⬜ |
 | H | Redis workers, FastAPI, WebSockets | ⬜ |
@@ -132,6 +132,21 @@ make check
 
 `deeptrace status` prints the resolved configuration and depth budgets;
 `deeptrace check` reports foundation health and what is still pending.
+
+To run research:
+
+```bash
+deeptrace research "Compare Kafka and RabbitMQ for high-scale microservices" \
+    --depth quick --checkpoint --save
+```
+
+`--save` writes the run and its evidence to PostgreSQL. `--checkpoint` writes the
+workflow state after each step, so a run stopped by an outage can be continued
+rather than paid for again:
+
+```bash
+deeptrace resume res_f460fa9e6f5740f0
+```
 
 ---
 

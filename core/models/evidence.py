@@ -296,3 +296,46 @@ class Evidence(BaseModel):
     def summary(self) -> str:
         status = self.verification.status.value if self.verification else "unchecked"
         return f"[{self.support_strength.value}/{status} w={self.weight}] {self.claim[:60]}"
+
+
+class EvidenceExtractionReport(BaseModel):
+    """What extraction produced, including what it rejected.
+
+    Rejections are reported rather than dropped. If a source yields three
+    fabricated passages, that is a fact about the run worth surfacing, and a
+    silent filter would hide it.
+
+    It lives in the models layer rather than beside the agent that fills it
+    because it is a contract, not an implementation detail: the workflow state,
+    the run object, and the report reader all hold one, and none of them should
+    have to import an agent to name the type they are holding.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    evidence: list[Evidence] = Field(default_factory=list)
+    rejected: list[tuple[str, str]] = Field(
+        default_factory=list,
+        description="Discarded passages, as (claim, reason).",
+    )
+    sources_processed: int = 0
+    sources_failed: int = 0
+    injection_attempts: list[str] = Field(
+        default_factory=list, description="Domains whose content addressed the model."
+    )
+
+    @property
+    def verified_evidence(self) -> list[Evidence]:
+        """Evidence whose passage was found verbatim in its source."""
+        return [item for item in self.evidence if item.is_verified]
+
+    @property
+    def rejection_rate(self) -> float:
+        total = len(self.evidence) + len(self.rejected)
+        return round(len(self.rejected) / total, 3) if total else 0.0
+
+    def summary(self) -> str:
+        return (
+            f"{len(self.evidence)} evidence ({len(self.verified_evidence)} verbatim) "
+            f"from {self.sources_processed} sources, {len(self.rejected)} rejected"
+        )

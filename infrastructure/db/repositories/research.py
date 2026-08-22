@@ -22,8 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.logging import get_logger
 from core.models.evidence import Evidence
+from core.models.run import ResearchRun
 from core.models.source import Source
-from core.pipeline import ResearchRun
 from core.tools.search import canonical_url
 from infrastructure.db.models import (
     AgentRunRow,

@@ -1,11 +1,14 @@
 """Command-line entry point.
 
-Its job at this stage is diagnostic: prove the package imports, configuration
-resolves, and logging works, without needing a database, a queue, or an API key.
-That makes "the application starts" a claim anyone can verify on a fresh clone
-rather than something the README asserts.
+Four commands, in the order you need them: ``status`` and ``check`` are
+diagnostic -- they prove the package imports, configuration resolves, and
+logging works without needing a database, a queue, or an API key, which makes
+"the application starts" a claim anyone can verify on a fresh clone. ``research``
+runs the workflow. ``resume`` continues one that stopped.
 
-Research commands are added by the milestones that implement them.
+The CLI is a composition root, not a layer: it parses arguments, opens the stores
+a run needs, calls one function, and prints what came back. Anything it did more
+than that would be logic the API and the worker could not reuse.
 """
 
 from __future__ import annotations
@@ -14,14 +17,16 @@ import argparse
 import asyncio
 import sys
 import textwrap
-from typing import TYPE_CHECKING
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Any
 
 from core.config import DEPTH_BUDGETS, ResearchDepth, Settings, get_settings
 from core.llm.pricing import format_cost
 from core.logging import configure_logging, get_logger
 
 if TYPE_CHECKING:
-    from core.pipeline import ResearchRun
+    from core.models.run import ResearchRun
 
 __version__ = "0.1.0"
 
@@ -131,26 +136,88 @@ async def _persist(run: ResearchRun) -> str | None:
     return None
 
 
-def _run_research(args: argparse.Namespace) -> int:
-    """Run the full pipeline and print a readable trace.
+@asynccontextmanager
+async def _checkpointer(enabled: bool) -> AsyncIterator[Any]:
+    """Open the durable checkpoint store, or hand back nothing.
 
-    Prints each stage as it becomes available rather than only the final
-    result, because the point of the system is that a conclusion can be walked
-    back to what produced it.
+    A run without one still completes; it simply cannot be resumed. Making that
+    a flag rather than the default keeps a smoke test from requiring a database,
+    which is the same reason the research engine does not import one.
     """
+    if not enabled:
+        yield None
+        return
+
+    from infrastructure.db.checkpointer import checkpointer_scope
+
+    async with checkpointer_scope() as saver:
+        yield saver
+
+
+def _run_research(args: argparse.Namespace) -> int:
+    """Run the workflow and print a readable trace."""
     from core.pipeline import run_research
 
     depth = ResearchDepth(args.depth)
 
     async def execute() -> tuple[ResearchRun, str | None]:
-        result = await run_research(args.question, depth=depth, max_tasks=args.max_tasks)
+        async with _checkpointer(args.checkpoint) as saver:
+            result = await run_research(
+                args.question, depth=depth, max_tasks=args.max_tasks, checkpointer=saver
+            )
         save_error = await _persist(result) if args.save else None
         return result, save_error
 
-    run, save_error = asyncio.run(execute())
+    try:
+        run, save_error = asyncio.run(execute())
+    except Exception as exc:
+        # Research failure is returned, never raised, so anything arriving here
+        # came from opening the checkpoint store -- which is worth reporting as
+        # what it is rather than as a failed run.
+        print(f"checkpointing unavailable: {type(exc).__name__}: {exc}")
+        print("Run without --checkpoint to research without a resumable record.")
+        return 1
 
+    return _print_run(run, save=args.save, save_error=save_error, checkpointed=args.checkpoint)
+
+
+def _resume_research(args: argparse.Namespace) -> int:
+    """Continue a checkpointed run from wherever it stopped."""
+    from core.graph.workflow import CheckpointNotFound
+    from core.pipeline import resume_research
+
+    async def execute() -> tuple[ResearchRun, str | None]:
+        async with _checkpointer(True) as saver:
+            result = await resume_research(args.research_id, checkpointer=saver)
+        save_error = await _persist(result) if args.save else None
+        return result, save_error
+
+    try:
+        run, save_error = asyncio.run(execute())
+    except CheckpointNotFound as exc:
+        print(f"cannot resume: {exc}")
+        return 1
+
+    return _print_run(run, save=args.save, save_error=save_error, checkpointed=True)
+
+
+def _print_run(
+    run: ResearchRun, *, save: bool, save_error: str | None, checkpointed: bool = False
+) -> int:
+    """Print the trace, stage by stage.
+
+    Prints each stage rather than only the final result, because the point of
+    the system is that a conclusion can be walked back to what produced it.
+
+    Shared by ``research`` and ``resume`` so a resumed run is displayed by the
+    same code as any other. A second printer would eventually disagree with this
+    one about what a run contains.
+    """
+    continued = "   resumed" if run.resumed else ""
     print()
-    print(f"Research {run.research_id}   depth={run.depth.value}   {run.elapsed_seconds}s")
+    print(
+        f"Research {run.research_id}   depth={run.depth.value}   {run.elapsed_seconds}s{continued}"
+    )
     print("=" * 94)
 
     if run.spec is not None:
@@ -220,8 +287,13 @@ def _run_research(args: argparse.Namespace) -> int:
         f"          {format_cost(usage.total_cost())}"
     )
     print(f"   tool calls: {len(usage.tool_calls)}")
+    if run.resumed:
+        # The tally covers this execution only. Everything restored from the
+        # checkpoint was paid for on the earlier attempt, and presenting the two
+        # as one total would understate what the research cost.
+        print("   (this attempt only -- steps restored from the checkpoint cost nothing here)")
 
-    if args.save:
+    if save:
         print()
         if save_error:
             print(f"   NOT SAVED: {save_error}")
@@ -231,6 +303,11 @@ def _run_research(args: argparse.Namespace) -> int:
     if run.error:
         print()
         print(f"FAILED: {run.error}")
+        if checkpointed:
+            # Only offered when there is something to continue. Suggesting it
+            # for a run with no checkpoint would send the reader to a command
+            # that can only tell them the state does not exist.
+            print(f"       deeptrace resume {run.research_id}")
         return 1
 
     print()
@@ -248,7 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("status", help="Show resolved configuration and depth budgets")
     subcommands.add_parser("check", help="Verify the foundation is correctly wired")
 
-    research = subcommands.add_parser("research", help="Run the full research pipeline")
+    research = subcommands.add_parser("research", help="Run the full research workflow")
     research.add_argument("question", help="The research question")
     research.add_argument(
         "--depth",
@@ -268,6 +345,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Persist the run to PostgreSQL (requires DATABASE_URL and migrations)",
     )
+    research.add_argument(
+        "--checkpoint",
+        action="store_true",
+        help="Write workflow state after each step so the run can be resumed",
+    )
+
+    resume = subcommands.add_parser(
+        "resume",
+        help="Continue a checkpointed run from wherever it stopped",
+    )
+    resume.add_argument("research_id", help="The id of a run started with --checkpoint")
+    resume.add_argument(
+        "--save",
+        action="store_true",
+        help="Persist the run to PostgreSQL once it finishes",
+    )
     return parser
 
 
@@ -286,6 +379,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_check(settings)
     if args.command == "research":
         return _run_research(args)
+    if args.command == "resume":
+        return _resume_research(args)
 
     parser.print_help()
     return 0
