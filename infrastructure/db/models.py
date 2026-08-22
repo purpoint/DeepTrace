@@ -100,6 +100,16 @@ class ResearchSession(Base):
 
     plan: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
+    analysis: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    """What the evidence was found to support, with what grounding discarded.
+
+    Stored whole, alongside the spec and the plan, rather than exploded into
+    tables of findings and citations. Claims and their verification get real
+    tables in the milestone that verifies them; until something queries a
+    finding on its own, a column that keeps the analysis intact is the honest
+    shape -- and a schema that promises query-ability nothing uses is worse than
+    one that does not."""
+
     created_at: Mapped[datetime] = mapped_column(default=_now, index=True)
     started_at: Mapped[datetime | None] = mapped_column(nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(nullable=True)

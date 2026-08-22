@@ -73,6 +73,7 @@ def run_from_state(
         plan=state.get("plan"),
         task_results=list(state.get("task_results", [])),
         evidence_report=_extraction_report(state),
+        analysis_report=state.get("analysis"),
         elapsed_seconds=elapsed_seconds,
         error=error,
         usage=usage or InMemoryRunRecorder(),

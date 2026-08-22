@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from core.config import ResearchDepth
+from core.models.analysis import Analysis, AnalysisReport
 from core.models.evidence import Evidence, EvidenceExtractionReport
 from core.models.plan import ResearchPlan
 from core.models.query import QuerySpec
@@ -35,6 +36,7 @@ class ResearchRun:
     plan: ResearchPlan | None = None
     task_results: list[TaskResult] = field(default_factory=list)
     evidence_report: EvidenceExtractionReport | None = None
+    analysis_report: AnalysisReport | None = None
     elapsed_seconds: float = 0.0
     error: str | None = None
     usage: InMemoryRunRecorder = field(default_factory=InMemoryRunRecorder)
@@ -51,6 +53,10 @@ class ResearchRun:
     @property
     def evidence(self) -> list[Evidence]:
         return self.evidence_report.evidence if self.evidence_report else []
+
+    @property
+    def analysis(self) -> Analysis | None:
+        return self.analysis_report.analysis if self.analysis_report else None
 
     @property
     def sources(self) -> list[Source]:

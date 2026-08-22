@@ -27,6 +27,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TypedDict
 
+from core.agents.analyst import AnalystAgent
 from core.agents.evidence import EvidenceAgent
 from core.agents.planner import ResearchPlanner
 from core.agents.query_analyzer import QueryAnalyzer
@@ -355,7 +356,7 @@ def make_evidence_node(ctx: NodeContext) -> NodeFn:
                 f"({report.sources_failed} failed)"
             )
 
-        status = ResearchStatus.FAILED if produced_nothing else ResearchStatus.COMPLETED
+        status = ResearchStatus.FAILED if produced_nothing else ResearchStatus.SYNTHESIZING
         update: ResearchState = {
             "evidence": report.evidence,
             "rejected": report.rejected,
@@ -368,9 +369,60 @@ def make_evidence_node(ctx: NodeContext) -> NodeFn:
         if produced_nothing:
             update["error"] = "evidence extraction produced no results"
 
-        # state_summary reports the status the node was entered with; the run
-        # is finishing, so the outgoing status is the accurate one.
-        log.info("graph.finished", **{**state_summary(state), "status": status.value})
         return update
 
     return extract
+
+
+def make_analysis_node(ctx: NodeContext) -> NodeFn:
+    """Draw conclusions from the verified evidence.
+
+    The last stage, and the only one that says something the sources did not.
+    It runs after extraction rather than alongside it because it needs the whole
+    pool: a contradiction is a relationship between two passages, and neither is
+    visible from inside the source that produced one of them.
+    """
+
+    async def analyse(state: ResearchState) -> ResearchState:
+        spec = state.get("spec")
+        question = spec.normalized_question if spec else state["question"]
+
+        try:
+            report = await AnalystAgent(ctx.client).analyse(
+                state.get("evidence", []),
+                question=question,
+                spec=spec,
+                sources=state.get("sources", []),
+                task_results=state.get("task_results", []),
+                research_id=state.get("research_id"),
+            )
+        except Exception as exc:
+            if _interrupted(exc):
+                raise
+            # A failed analysis is not a failed run. The evidence is collected,
+            # verified, and stored, and it is worth more than the conclusions
+            # drawn from it -- so the run keeps what it has and says what is
+            # missing rather than discarding the expensive part.
+            log.warning(
+                "graph.analysis_failed",
+                research_id=state.get("research_id"),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return {
+                "errors": [f"analysis: {type(exc).__name__}: {exc}"],
+                **_advance(ResearchStatus.COMPLETED),
+            }
+
+        problems = [f"analysis discarded: {statement}" for statement, _ in report.dropped]
+        log.info(
+            "graph.finished",
+            **{**state_summary(state), "status": ResearchStatus.COMPLETED.value},
+        )
+        return {
+            "analysis": report,
+            "errors": problems,
+            **_advance(ResearchStatus.COMPLETED),
+        }
+
+    return analyse

@@ -1,6 +1,6 @@
 """The research workflow graph.
 
-    START -> analyze -> plan -> dispatch -> evidence -> END
+    START -> analyze -> plan -> dispatch -> evidence -> analysis -> END
                                   ^  |
                                   |  +--> research_task (one per task)
                                   +--------------+
@@ -49,6 +49,7 @@ from langgraph.types import Send
 from core.config import DEPTH_BUDGETS, ResearchDepth, Settings, get_settings
 from core.graph.nodes import (
     NodeContext,
+    make_analysis_node,
     make_analyze_node,
     make_dispatch_node,
     make_evidence_node,
@@ -205,6 +206,7 @@ def build_graph(
     graph.add_node("dispatch", make_dispatch_node())  # type: ignore[call-overload]
     graph.add_node("research_task", make_task_node(ctx))  # type: ignore[call-overload]
     graph.add_node("evidence", make_evidence_node(ctx))  # type: ignore[call-overload]
+    graph.add_node("analysis", make_analysis_node(ctx))  # type: ignore[call-overload]
 
     route = make_router(max_iterations)
     graph.add_edge(START, "analyze")
@@ -220,7 +222,8 @@ def build_graph(
     # wave rather than once per task: nodes converging on one target in the same
     # step execute it a single time.
     graph.add_edge("research_task", "dispatch")
-    graph.add_edge("evidence", END)
+    graph.add_conditional_edges("evidence", route, {"continue": "analysis", "stop": END})
+    graph.add_edge("analysis", END)
 
     return graph.compile(checkpointer=checkpointer)
 

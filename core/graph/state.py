@@ -30,6 +30,7 @@ import operator
 from enum import StrEnum
 from typing import Annotated, Any, TypedDict
 
+from core.models.analysis import AnalysisReport
 from core.models.evidence import Evidence
 from core.models.plan import ResearchPlan
 from core.models.query import QuerySpec
@@ -45,6 +46,7 @@ class ResearchStatus(StrEnum):
     PLANNING = "planning"
     RESEARCHING = "researching"
     EXTRACTING = "extracting"
+    SYNTHESIZING = "synthesizing"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -103,6 +105,14 @@ class ResearchState(TypedDict, total=False):
     injection_attempts: Annotated[list[str], operator.add]
     """Domains whose retrieved content addressed the model."""
 
+    analysis: AnalysisReport | None
+    """What the evidence supports, and what grounding discarded.
+
+    Written by one node, so it needs no reducer. Held whole rather than split
+    into findings and discards because the two are only meaningful together:
+    five findings from an analysis that discarded ten is a different result from
+    five that discarded none."""
+
     sources_processed: Annotated[int, operator.add]
     sources_failed: Annotated[int, operator.add]
     """Summed rather than replaced, for the same reason the lists are appended:
@@ -152,6 +162,7 @@ def initial_state(
         task_results=[],
         sources=[],
         evidence=[],
+        analysis=None,
         rejected=[],
         injection_attempts=[],
         sources_processed=0,
@@ -182,6 +193,7 @@ def state_summary(state: ResearchState) -> dict[str, Any]:
         "tasks_completed": len(state.get("task_results", [])),
         "sources": len(state.get("sources", [])),
         "evidence": len(state.get("evidence", [])),
+        "findings": len(analysis.analysis.findings) if (analysis := state.get("analysis")) else 0,
         "rejected": len(state.get("rejected", [])),
         "errors": len(state.get("errors", [])),
     }

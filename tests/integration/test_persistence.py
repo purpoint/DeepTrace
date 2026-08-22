@@ -469,3 +469,61 @@ class TestHistory:
 
         listed = await repo.list_sessions(limit=10)
         assert len(listed) >= 3
+
+
+class TestAnalysisPersistence:
+    """The analysis is the most valuable thing a run produces and the easiest to
+    lose: it exists only in memory until the session row is written."""
+
+    async def test_the_analysis_survives_a_round_trip(self, db_session: AsyncSession) -> None:
+        from core.models.analysis import (
+            Analysis,
+            AnalysisReport,
+            Confidence,
+            Finding,
+        )
+
+        run = ResearchRun(
+            research_id="res_analysis",
+            question="How does Kafka order records?",
+            depth=ResearchDepth.QUICK,
+        )
+        run.analysis_report = AnalysisReport(
+            analysis=Analysis(
+                summary="The evidence describes partition-level ordering guarantees.",
+                findings=[
+                    Finding(
+                        statement="Kafka preserves record order within a partition.",
+                        evidence_ids=["ev_1"],
+                        confidence=Confidence.MODERATE,
+                        corroborating_domains=2,
+                    )
+                ],
+            ),
+            dropped=[("An invented conclusion.", "no evidence citation resolved")],
+            evidence_considered=4,
+        )
+
+        await ResearchRepository(db_session).save_run(run)
+        stored = await ResearchRepository(db_session).get_session("res_analysis")
+
+        assert stored is not None
+        assert stored.analysis is not None
+        assert stored.analysis["analysis"]["findings"][0]["corroborating_domains"] == 2
+        assert stored.analysis["dropped"], "what grounding discarded was not stored"
+
+    async def test_a_run_without_analysis_stores_null(self, db_session: AsyncSession) -> None:
+        """A run that failed before analysis has none, which is different from
+        an analysis that concluded nothing."""
+        run = ResearchRun(
+            research_id="res_no_analysis",
+            question="q",
+            depth=ResearchDepth.QUICK,
+            error="LLMServerError: 503",
+        )
+
+        await ResearchRepository(db_session).save_run(run)
+        stored = await ResearchRepository(db_session).get_session("res_no_analysis")
+
+        assert stored is not None
+        assert stored.analysis is None

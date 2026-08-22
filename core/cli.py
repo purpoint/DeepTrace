@@ -273,6 +273,55 @@ def _print_run(
             print()
             print(f"   prompt injection observed in: {', '.join(report.injection_attempts)}")
 
+    if run.analysis_report is not None:
+        analysis = run.analysis_report.analysis
+        print()
+        print(f"ANALYSIS   {run.analysis_report.summary()}")
+        print(_wrap(analysis.summary, indent="   "))
+
+        for finding in analysis.findings:
+            print()
+            print(_wrap(f"* {finding.statement}", indent="   "))
+            print(
+                f"       {finding.confidence.value} confidence, "
+                f"{finding.corroborating_domains} publisher(s), "
+                f"evidence: {', '.join(finding.evidence_ids[:4])}"
+            )
+
+        for tradeoff in analysis.tradeoffs:
+            print()
+            print(_wrap(f"trade-off - {tradeoff.subject}", indent="   "))
+            print(_wrap(f"+ {tradeoff.benefit}", indent="       "))
+            print(_wrap(f"- {tradeoff.cost}", indent="       "))
+
+        # Printed prominently rather than folded into the findings: a contested
+        # question is one of the most useful things research establishes, and a
+        # reader who skims must not miss that the sources disagree.
+        for contradiction in analysis.contradictions:
+            print()
+            print(_wrap(f"CONTRADICTION - {contradiction.subject}", indent="   "))
+            print(_wrap(f"A: {contradiction.position_a}", indent="       "))
+            print(_wrap(f"B: {contradiction.position_b}", indent="       "))
+
+        for recommendation in analysis.recommendations:
+            print()
+            print(_wrap(f"> {recommendation.recommendation}", indent="   "))
+            print(_wrap(f"when: {recommendation.condition}", indent="       "))
+
+        if analysis.open_questions:
+            print()
+            print("   NOT ANSWERED BY THIS RESEARCH")
+            for question in analysis.open_questions:
+                print(_wrap(f"? {question.question}", indent="       "))
+                print(_wrap(question.why_unanswered, indent="         "))
+
+        if run.analysis_report.dropped:
+            print()
+            print("   DISCARDED (cited evidence that does not exist)")
+            for statement, reason in run.analysis_report.dropped[:5]:
+                print(_wrap(f"x {statement}", indent="       "))
+                print(_wrap(reason, indent="         "))
+
     print()
     print("COST")
     usage = run.usage

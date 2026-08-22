@@ -63,6 +63,7 @@ class ResearchRepository:
             research_id=run.research_id,
             sources=len(sources),
             evidence=len(run.evidence),
+            findings=len(run.analysis.findings) if run.analysis else 0,
             failed=run.error is not None,
         )
 
@@ -85,6 +86,9 @@ class ResearchRepository:
             "error": run.error,
             "spec": run.spec.model_dump(mode="json") if run.spec else None,
             "plan": run.plan.model_dump(mode="json") if run.plan else None,
+            "analysis": (
+                run.analysis_report.model_dump(mode="json") if run.analysis_report else None
+            ),
             "completed_at": now,
         }
         statement = insert(ResearchSession).values(values)

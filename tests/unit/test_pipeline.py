@@ -104,6 +104,27 @@ EVIDENCE = json.dumps(
 )
 
 
+ANALYSIS = json.dumps(
+    {
+        "summary": (
+            "The sources agree that ordering is guaranteed within a partition "
+            "and say nothing about ordering across partitions."
+        ),
+        "findings": [
+            {
+                "statement": "Kafka preserves record order within a single partition.",
+                "evidence_ids": ["E1"],
+                "confidence": "high",
+            }
+        ],
+        "tradeoffs": [],
+        "contradictions": [],
+        "recommendations": [],
+        "open_questions": [],
+    }
+)
+
+
 class WorkerKilled(BaseException):
     """Stands in for the process being killed.
 
@@ -147,7 +168,7 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> InMemoryRunRecorder:
     from tests.fakes import FakeProvider
 
     recorder = InMemoryRunRecorder()
-    responses = [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE]
+    responses = [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS]
 
     def fake_client(settings: object = None, *, recorder: object = None) -> LLMClient:
         return LLMClient(
@@ -208,7 +229,8 @@ class TestPipelineWiring:
         run = await run_research("How does Kafka order records?", settings=configured())
 
         assert run.usage.total_tokens() > 0
-        assert len(run.usage.agent_runs) == 5  # analyse, plan, queries, sufficiency, evidence
+        # analyse, plan, queries, sufficiency, evidence, analysis
+        assert len(run.usage.agent_runs) == 6
         assert run.usage.tool_calls
 
 
@@ -353,7 +375,7 @@ class TestResume:
 
         # One provider across both attempts, so the second picks up where the
         # first stopped rather than replaying the analyzer's response.
-        provider = FakeProvider([SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE])
+        provider = FakeProvider([SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS])
 
         def fake_client(settings: object = None, *, recorder: object = None) -> LLMClient:
             return LLMClient(

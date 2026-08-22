@@ -81,7 +81,27 @@ EVIDENCE = json.dumps(
     }
 )
 
-HAPPY_PATH = [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE]
+ANALYSIS = json.dumps(
+    {
+        "summary": (
+            "The sources agree that ordering is guaranteed within a partition "
+            "and say nothing about ordering across partitions."
+        ),
+        "findings": [
+            {
+                "statement": "Kafka preserves record order within a single partition.",
+                "evidence_ids": ["E1"],
+                "confidence": "high",
+            }
+        ],
+        "tradeoffs": [],
+        "contradictions": [],
+        "recommendations": [],
+        "open_questions": [],
+    }
+)
+
+HAPPY_PATH = [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS]
 
 
 class StubSearch:
@@ -128,8 +148,8 @@ class TestFullRun:
 
         assert final["status"] == ResearchStatus.COMPLETED.value
         # analyze, plan, dispatch, the task, dispatch again to find no wave
-        # left, evidence.
-        assert final["iteration"] == 6
+        # left, evidence, analysis.
+        assert final["iteration"] == 7
         assert final["spec"] is not None
         assert final["plan"] is not None
         assert len(final["task_results"]) == 1
@@ -519,6 +539,7 @@ def make_parallel_ctx(
             "query_generator": QUERIES,
             "sufficiency_check": SUFFICIENT,
             "evidence_extractor": EVIDENCE,
+            "analyst": ANALYSIS,
         }
     )
     recorder = InMemoryRunRecorder()

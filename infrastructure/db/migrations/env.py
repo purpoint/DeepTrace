@@ -12,6 +12,7 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
+from alembic.runtime.environment import NameFilterParentNames, NameFilterType
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -32,6 +33,29 @@ if settings.database_url:
     config.set_main_option("sqlalchemy.url", normalise_database_url(settings.database_url))
 
 
+def include_name(
+    name: str | None,
+    type_: NameFilterType,
+    parent_names: NameFilterParentNames,  # noqa: ARG001 - Alembic's callback signature
+) -> bool:
+    """Consider only the tables this project's models declare.
+
+    Autogenerate compares the models against everything in the database, so a
+    table it does not own reads as a table that should not exist. LangGraph's
+    checkpointer creates and manages its own tables, and the first autogenerate
+    after they appeared produced a migration whose upgrade dropped all four --
+    which is every checkpoint, and every run that could have been resumed.
+
+    Caught by reading the generated migration. A migration is code, generated or
+    not, and this is the failure mode that makes reading it non-optional: the
+    change asked for was one added column, and the file also contained four
+    silent drops.
+    """
+    if type_ == "table":
+        return name in target_metadata.tables
+    return True
+
+
 def _configure(connection: Connection) -> None:
     context.configure(
         connection=connection,
@@ -40,6 +64,7 @@ def _configure(connection: Connection) -> None:
         # A silently unmigrated type change is worse than a noisy diff.
         compare_type=True,
         compare_server_default=True,
+        include_name=include_name,
     )
 
 
@@ -50,6 +75,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_name=include_name,
     )
     with context.begin_transaction():
         context.run_migrations()
