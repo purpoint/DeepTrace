@@ -40,12 +40,13 @@ workflow engine instead of calling the agents in sequence.
 from __future__ import annotations
 
 from collections.abc import Callable
+from math import ceil
 from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
-from core.config import ResearchDepth, Settings, get_settings
+from core.config import DEPTH_BUDGETS, ResearchDepth, Settings, get_settings
 from core.graph.nodes import (
     NodeContext,
     make_analyze_node,
@@ -110,7 +111,7 @@ def make_router(max_iterations: int) -> Callable[[ResearchState], Literal["conti
 
 
 def make_dispatch_router(
-    max_iterations: int, max_tasks: int | None
+    max_iterations: int, max_tasks: int | None, depth: ResearchDepth
 ) -> Callable[[ResearchState], Any]:
     """Decide what the dispatcher hands out next.
 
@@ -134,6 +135,14 @@ def make_dispatch_router(
             return END
 
         waves = planned_waves(plan, max_tasks)
+
+        # Divided across every task that will run, not per wave: the budget is a
+        # ceiling on the run, and a plan of four waves would otherwise spend it
+        # four times over. Rounded up, and never below one -- a task with no
+        # allowance is a task that researches nothing.
+        running = sum(len(wave) for wave in waves)
+        share = max(1, ceil(DEPTH_BUDGETS[depth].max_sources / running)) if running else 1
+
         index = state.get("wave", 0) - 1
         if index < 0 or index >= len(waves):
             # Every wave has run, or the plan had no tasks to run at all. Either
@@ -147,6 +156,7 @@ def make_dispatch_router(
                     "task": task,
                     "spec": state.get("spec"),
                     "research_id": state.get("research_id"),
+                    "source_budget": share,
                 },
             )
             for task in waves[index]
@@ -203,7 +213,7 @@ def build_graph(
 
     graph.add_conditional_edges(
         "dispatch",
-        make_dispatch_router(max_iterations, ctx.max_tasks),
+        make_dispatch_router(max_iterations, ctx.max_tasks, ctx.depth),
         ["research_task", "evidence", END],
     )
     # Every task in a wave edges back to the dispatcher, which runs once for the

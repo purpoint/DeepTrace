@@ -31,7 +31,7 @@ from core.agents.evidence import EvidenceAgent
 from core.agents.planner import ResearchPlanner
 from core.agents.query_analyzer import QueryAnalyzer
 from core.agents.researcher import ResearchAgent
-from core.config import ResearchDepth
+from core.config import DEPTH_BUDGETS, ResearchDepth
 from core.graph.state import ResearchState, ResearchStatus, state_summary
 from core.llm.client import LLMClient
 from core.logging import get_logger
@@ -208,6 +208,13 @@ class TaskAssignment(TypedDict):
     task: ResearchTask
     spec: QuerySpec | None
     research_id: str | None
+    source_budget: int
+    """This task's share of the run's source budget.
+
+    Divided by the dispatcher, which knows how many tasks the plan has. The
+    researcher cannot divide it -- it sees one task and would apply the whole
+    run's ceiling to it, which is how a three-task quick run collected
+    twenty-four sources against a budget of eight."""
 
 
 def planned_waves(plan: ResearchPlan, max_tasks: int | None) -> list[list[ResearchTask]]:
@@ -280,6 +287,7 @@ def make_task_node(ctx: NodeContext) -> Callable[[TaskAssignment], Awaitable[Res
                     spec=assignment.get("spec"),
                     depth=ctx.depth,
                     research_id=assignment.get("research_id"),
+                    source_budget=assignment["source_budget"],
                 )
             except Exception as exc:
                 if _interrupted(exc):
@@ -321,7 +329,10 @@ def make_evidence_node(ctx: NodeContext) -> NodeFn:
 
         try:
             report = await EvidenceAgent(ctx.client).extract(
-                sources, question=question, research_id=state.get("research_id")
+                sources,
+                question=question,
+                research_id=state.get("research_id"),
+                limit=DEPTH_BUDGETS[ctx.depth].max_sources,
             )
         except Exception as exc:
             if _interrupted(exc):

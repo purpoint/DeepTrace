@@ -390,7 +390,12 @@ class TestMultipleSources:
             max_repair_attempts=0,
         )
         agent = EvidenceAgent(client, max_concurrency=1)
-        sources = [source(id="src_bad"), source(id="src_good")]
+        # Distinct URLs: two sources at one URL are one page, and extraction
+        # collapses them rather than paying twice for the same text.
+        sources = [
+            source(id="src_bad", url="https://kafka.apache.org/docs/bad"),
+            source(id="src_good", url="https://kafka.apache.org/docs/good"),
+        ]
 
         report = await agent.extract(sources, question="q")
 
@@ -400,7 +405,10 @@ class TestMultipleSources:
 
     async def test_evidence_records_which_source_it_came_from(self) -> None:
         agent, _ = make_agent(extraction_json())
-        sources = [source(id="src_a"), source(id="src_b")]
+        sources = [
+            source(id="src_a", url="https://kafka.apache.org/docs/a"),
+            source(id="src_b", url="https://kafka.apache.org/docs/b"),
+        ]
 
         report = await agent.extract(sources, question="q")
 
@@ -470,3 +478,100 @@ class TestPromptContract:
 
     def test_prompt_forbids_outside_knowledge(self) -> None:
         assert "not in this document" in EVIDENCE_EXTRACTOR_V1.system.lower()
+
+
+class TestSelectionForExtraction:
+    """Extraction is one model call per source and the largest line item in a
+    run, so what reaches it is the main cost control.
+
+    Found by measuring a live run: a three-task quick run collected 24 sources
+    against a documented budget of 8, because the budget was enforced per task
+    rather than per run -- and every one of those 24 bought an extraction call.
+    """
+
+    def test_the_same_page_found_twice_is_extracted_once(self) -> None:
+        """Deduplication in the researcher is per task, so two tasks that find
+        the same URL each carry their own copy. The repository collapses them on
+        write, so the second copy's evidence is discarded as orphaned -- paid
+        for, then thrown away."""
+        from core.agents.evidence import select_for_extraction
+
+        chosen = select_for_extraction(
+            [
+                source(id="src_1", task_id="a", url="https://kafka.apache.org/docs"),
+                source(id="src_2", task_id="b", url="https://kafka.apache.org/docs?utm_source=x"),
+            ]
+        )
+
+        assert len(chosen) == 1
+
+    def test_the_better_copy_of_a_duplicate_survives(self) -> None:
+        from core.agents.evidence import select_for_extraction
+
+        chosen = select_for_extraction(
+            [
+                source(id="poor", task_id="a", url="https://k.example/docs", quality_score=0.4),
+                source(id="rich", task_id="b", url="https://k.example/docs", quality_score=0.9),
+            ]
+        )
+
+        assert [item.id for item in chosen] == ["rich"]
+
+    def test_the_run_budget_is_a_ceiling_on_the_run(self) -> None:
+        from core.agents.evidence import select_for_extraction
+
+        collected = [
+            source(id=f"src_{n}", task_id=f"task_{n % 3}", url=f"https://e{n}.example/doc")
+            for n in range(24)
+        ]
+
+        assert len(select_for_extraction(collected, limit=8)) == 8
+
+    def test_no_task_is_starved_by_a_better_supplied_one(self) -> None:
+        """Taking the best sources overall lets one task with excellent
+        documentation consume the whole budget, and the aspect covered only by a
+        task with weaker sources vanishes from the evidence -- a gap in the
+        answer produced by a cost control."""
+        from core.agents.evidence import select_for_extraction
+
+        strong = [
+            source(
+                id=f"strong_{n}",
+                task_id="well_documented",
+                quality_score=0.97,
+                url=f"https://docs.example/{n}",
+            )
+            for n in range(6)
+        ]
+        weak = [
+            source(
+                id=f"weak_{n}",
+                task_id="obscure",
+                quality_score=0.4,
+                url=f"https://blog.example/{n}",
+            )
+            for n in range(6)
+        ]
+
+        chosen = select_for_extraction([*strong, *weak], limit=4)
+
+        assert {item.task_id for item in chosen} == {"well_documented", "obscure"}
+
+    async def test_what_was_not_extracted_is_reported(self) -> None:
+        """A source that cost a search and a fetch and then never reached
+        extraction is a fact about the run. A report that hid it would make a
+        budget look like thoroughness."""
+        agent, _ = make_agent(extraction_json())
+        collected = [
+            source(id="dup_a", task_id="a", url="https://kafka.apache.org/docs"),
+            source(id="dup_b", task_id="b", url="https://kafka.apache.org/docs"),
+            source(id="src_2", task_id="a", url="https://kafka.apache.org/design"),
+            source(id="src_3", task_id="b", url="https://kafka.apache.org/ops"),
+        ]
+
+        report = await agent.extract(collected, question="q", limit=2)
+
+        assert report.sources_processed == 2
+        assert report.duplicates_collapsed == 1
+        assert report.over_budget == 1
+        assert "not extracted" in report.summary()

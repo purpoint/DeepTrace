@@ -320,6 +320,16 @@ class EvidenceExtractionReport(BaseModel):
     )
     sources_processed: int = 0
     sources_failed: int = 0
+
+    duplicates_collapsed: int = 0
+    """Sources dropped because another source was the same page.
+
+    Counted rather than ignored: it is the measure of how much of the search
+    budget two tasks spent finding the same document."""
+
+    over_budget: int = 0
+    """Sources collected but not extracted from, because the run's source budget
+    was already spent. A gap in the evidence with a cause attached."""
     injection_attempts: list[str] = Field(
         default_factory=list, description="Domains whose content addressed the model."
     )
@@ -335,7 +345,13 @@ class EvidenceExtractionReport(BaseModel):
         return round(len(self.rejected) / total, 3) if total else 0.0
 
     def summary(self) -> str:
+        skipped = ""
+        if self.duplicates_collapsed or self.over_budget:
+            skipped = (
+                f", {self.duplicates_collapsed} duplicate / "
+                f"{self.over_budget} over budget not extracted"
+            )
         return (
             f"{len(self.evidence)} evidence ({len(self.verified_evidence)} verbatim) "
-            f"from {self.sources_processed} sources, {len(self.rejected)} rejected"
+            f"from {self.sources_processed} sources, {len(self.rejected)} rejected{skipped}"
         )

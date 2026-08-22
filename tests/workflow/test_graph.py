@@ -654,3 +654,51 @@ class TestAnInterruptedWave:
         # search would mean producer_side was researched twice -- work that had
         # already finished and had already been paid for.
         assert search.calls == 3
+
+
+class TestTheRunBudgetIsARunBudget:
+    """``DepthBudget`` says it limits "a research run". It did not.
+
+    The researcher applied ``max_sources`` to each task it was handed, so a
+    three-task quick run collected 24 sources against a budget of 8 -- and at
+    standard depth, six tasks against a budget of 20 could collect 120. Every
+    source collected buys an extraction call, so the ceiling that was supposed
+    to be the main cost control multiplied the cost instead.
+    """
+
+    async def test_each_task_gets_a_share_rather_than_the_whole_budget(self) -> None:
+        from core.config import DEPTH_BUDGETS, ResearchDepth
+
+        seen: list[int] = []
+        ctx, _ = make_parallel_ctx()
+
+        from core.agents.researcher import ResearchAgent
+
+        real_research = ResearchAgent.research
+
+        async def capture(self: ResearchAgent, task: object, **kwargs: object) -> object:
+            seen.append(kwargs["source_budget"])  # type: ignore[arg-type]
+            return await real_research(self, task, **kwargs)  # type: ignore[arg-type]
+
+        ResearchAgent.research = capture  # type: ignore[method-assign]
+        try:
+            ctx.depth = ResearchDepth.QUICK
+            await run_workflow("q", ctx=ctx, depth=ResearchDepth.QUICK)
+        finally:
+            ResearchAgent.research = real_research  # type: ignore[method-assign]
+
+        budget = DEPTH_BUDGETS[ResearchDepth.QUICK].max_sources
+        assert len(seen) == 3
+        assert sum(seen) <= budget + len(seen), "the shares add up to more than the run's budget"
+        assert all(share >= 1 for share in seen), "a task with no allowance researches nothing"
+
+    async def test_extraction_never_exceeds_the_budget(self) -> None:
+        """The belt to the shares' braces: rounding up a share, or a task
+        returning more than it was asked for, must not raise the run's cost."""
+        from core.config import DEPTH_BUDGETS, ResearchDepth
+
+        ctx, _ = make_parallel_ctx()
+        ctx.depth = ResearchDepth.QUICK
+        final = await run_workflow("q", ctx=ctx, depth=ResearchDepth.QUICK)
+
+        assert final["sources_processed"] <= DEPTH_BUDGETS[ResearchDepth.QUICK].max_sources

@@ -85,14 +85,23 @@ class ResearchAgent:
         spec: QuerySpec | None = None,
         depth: ResearchDepth = ResearchDepth.STANDARD,
         research_id: str | None = None,
+        source_budget: int | None = None,
     ) -> TaskResult:
         """Research one task until a stop condition is met.
+
+        Args:
+            source_budget: How many sources this task may collect. Defaults to
+                the depth's whole run budget, which is right when one task is
+                being researched alone and wrong when a plan is being executed:
+                the caller that knows how many tasks share the run is the one
+                that can divide it, and this is where the share arrives.
 
         Never raises for research failure. A task that found nothing returns a
         result recording that, because one failed task must not discard the
         successful ones alongside it.
         """
         budget = DEPTH_BUDGETS[depth]
+        max_sources = budget.max_sources if source_budget is None else max(1, source_budget)
         freshness = spec.freshness_required if spec else False
         objective = spec.normalized_question if spec else task.question
 
@@ -126,7 +135,7 @@ class ResearchAgent:
                 sources=sources,
                 failed=failed,
                 freshness=freshness,
-                budget_remaining=budget.max_sources - len(sources),
+                budget_remaining=max_sources - len(sources),
                 research_id=research_id,
             )
 
@@ -134,8 +143,8 @@ class ResearchAgent:
                 stop_reason = "no new sources found; queries have converged"
                 break
 
-            if len(sources) >= budget.max_sources:
-                stop_reason = f"source budget reached ({budget.max_sources})"
+            if len(sources) >= max_sources:
+                stop_reason = f"source budget reached ({max_sources})"
                 break
 
             check = await self._check_sufficiency(

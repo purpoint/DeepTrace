@@ -32,6 +32,7 @@ from core.models.source import Source
 from core.observability.recorder import new_run_id
 from core.prompts.evidence import EVIDENCE_EXTRACTOR_V1
 from core.prompts.registry import Prompt, wrap_untrusted
+from core.tools.search import canonical_url
 
 log = get_logger(__name__)
 
@@ -70,6 +71,53 @@ class ExtractionResult(BaseModel):
     )
 
 
+def select_for_extraction(sources: list[Source], limit: int | None = None) -> list[Source]:
+    """Choose which sources are worth an extraction call.
+
+    Extraction is one model call per source and the largest line item in a run,
+    so what is sent matters more here than anywhere else. Two reductions, both
+    of which remove cost without removing reach:
+
+    *The same page found twice is extracted once.* Deduplication inside the
+    researcher is per task, so two tasks that discover the same URL each carry
+    their own copy. Extracting both pays twice for identical text -- and the
+    repository collapses them on write, so the second copy's evidence is
+    discarded as orphaned. Paid for, then thrown away.
+
+    *A run does not exceed its source budget.* The budget is a ceiling on the
+    run, not on each task, and enforcing it only per task multiplies it by the
+    number of tasks.
+
+    Selection is round-robin across tasks rather than the best sources overall.
+    Taking the top by quality lets one task with excellent documentation consume
+    the whole budget, and the aspect covered only by a task with weaker sources
+    then vanishes from the evidence entirely -- a gap in the answer produced by
+    a cost control, which is the worst way to lose coverage. Every task
+    contributes its best source before any task contributes its second.
+    """
+    best_by_page: dict[str, Source] = {}
+    for source in sources:
+        key = canonical_url(source.url)
+        held = best_by_page.get(key)
+        if held is None or source.quality_score > held.quality_score:
+            best_by_page[key] = source
+
+    by_task: dict[str | None, list[Source]] = {}
+    for source in best_by_page.values():
+        by_task.setdefault(source.task_id, []).append(source)
+    for group in by_task.values():
+        group.sort(key=lambda item: (-item.quality_score, item.id))
+
+    ordered: list[Source] = []
+    queues = list(by_task.values())
+    while any(queues):
+        for group in queues:
+            if group:
+                ordered.append(group.pop(0))
+
+    return ordered if limit is None else ordered[:limit]
+
+
 class EvidenceAgent:
     """Extracts attributed evidence from sources."""
 
@@ -93,15 +141,28 @@ class EvidenceAgent:
         question: str,
         task_id: str | None = None,
         research_id: str | None = None,
+        limit: int | None = None,
     ) -> EvidenceExtractionReport:
         """Extract evidence from every usable source.
+
+        Args:
+            limit: Most sources to extract from, the run's source budget. Passed
+                by the caller that knows the depth rather than read here, so this
+                agent stays usable on any list of sources.
 
         Sources are processed concurrently under a bound. Extraction is one call
         per source and a research run can hold fifty of them, so doing it
         serially would dominate latency -- while doing it unbounded would hit
         provider rate limits and spend the token budget in a burst.
+
+        What is *not* extracted is counted, not quietly skipped. A source that
+        cost a search and a fetch and then never reached extraction is a fact
+        about the run, and a report that hid it would make a budget look like
+        thoroughness.
         """
-        usable = [source for source in sources if source.has_content]
+        with_content = [source for source in sources if source.has_content]
+        usable = select_for_extraction(with_content, limit)
+        collapsed = len({canonical_url(s.url) for s in with_content})
         semaphore = asyncio.Semaphore(self.max_concurrency)
 
         async def worker(source: Source) -> tuple[Source, ExtractionResult | None]:
@@ -112,7 +173,11 @@ class EvidenceAgent:
 
         outcomes = await asyncio.gather(*(worker(source) for source in usable))
 
-        report = EvidenceExtractionReport(sources_processed=len(usable))
+        report = EvidenceExtractionReport(
+            sources_processed=len(usable),
+            duplicates_collapsed=len(with_content) - collapsed,
+            over_budget=max(0, collapsed - len(usable)),
+        )
         for source, extraction in outcomes:
             if extraction is None:
                 report.sources_failed += 1
@@ -132,6 +197,9 @@ class EvidenceAgent:
             research_id=research_id,
             task_id=task_id,
             sources=report.sources_processed,
+            collected=len(with_content),
+            duplicates_collapsed=report.duplicates_collapsed,
+            over_budget=report.over_budget,
             failed_sources=report.sources_failed,
             evidence=len(report.evidence),
             verbatim=len(report.verified_evidence),
