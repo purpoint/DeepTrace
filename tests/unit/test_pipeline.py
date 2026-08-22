@@ -125,6 +125,17 @@ ANALYSIS = json.dumps(
 )
 
 
+VERIFICATION = json.dumps(
+    {
+        "verdict": "supported",
+        "disposition": "pass",
+        "reasoning": "The cited passage states the ordering guarantee directly.",
+        "supporting_evidence_ids": ["C1"],
+        "contradicting_evidence_ids": [],
+    }
+)
+
+
 class WorkerKilled(BaseException):
     """Stands in for the process being killed.
 
@@ -168,7 +179,7 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> InMemoryRunRecorder:
     from tests.fakes import FakeProvider
 
     recorder = InMemoryRunRecorder()
-    responses = [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS]
+    responses = [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS, VERIFICATION]
 
     def fake_client(settings: object = None, *, recorder: object = None) -> LLMClient:
         return LLMClient(
@@ -229,8 +240,8 @@ class TestPipelineWiring:
         run = await run_research("How does Kafka order records?", settings=configured())
 
         assert run.usage.total_tokens() > 0
-        # analyse, plan, queries, sufficiency, evidence, analysis
-        assert len(run.usage.agent_runs) == 6
+        # analyse, plan, queries, sufficiency, evidence, analysis, verification
+        assert len(run.usage.agent_runs) == 7
         assert run.usage.tool_calls
 
 
@@ -375,7 +386,7 @@ class TestResume:
 
         # One provider across both attempts, so the second picks up where the
         # first stopped rather than replaying the analyzer's response.
-        provider = FakeProvider([SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS])
+        provider = FakeProvider([SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS, VERIFICATION])
 
         def fake_client(settings: object = None, *, recorder: object = None) -> LLMClient:
             return LLMClient(

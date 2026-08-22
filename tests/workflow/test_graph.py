@@ -101,7 +101,17 @@ ANALYSIS = json.dumps(
     }
 )
 
-HAPPY_PATH = [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS]
+VERIFICATION = json.dumps(
+    {
+        "verdict": "supported",
+        "disposition": "pass",
+        "reasoning": "The cited passage states the ordering guarantee directly.",
+        "supporting_evidence_ids": ["C1"],
+        "contradicting_evidence_ids": [],
+    }
+)
+
+HAPPY_PATH = [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS, VERIFICATION]
 
 
 class StubSearch:
@@ -148,8 +158,8 @@ class TestFullRun:
 
         assert final["status"] == ResearchStatus.COMPLETED.value
         # analyze, plan, dispatch, the task, dispatch again to find no wave
-        # left, evidence, analysis, claims.
-        assert final["iteration"] == 8
+        # left, evidence, analysis, claims, verify.
+        assert final["iteration"] == 9
         assert final["spec"] is not None
         assert final["plan"] is not None
         assert len(final["task_results"]) == 1
@@ -540,6 +550,7 @@ def make_parallel_ctx(
             "sufficiency_check": SUFFICIENT,
             "evidence_extractor": EVIDENCE,
             "analyst": ANALYSIS,
+            "fact_checker": VERIFICATION,
         }
     )
     recorder = InMemoryRunRecorder()

@@ -1,6 +1,6 @@
 """The research workflow graph.
 
-    START -> analyze -> plan -> dispatch -> evidence -> analysis -> claims -> END
+    START -> analyze -> plan -> dispatch -> evidence -> analysis -> claims -> verify -> END
                                   ^  |
                                   |  +--> research_task (one per task)
                                   +--------------+
@@ -56,6 +56,7 @@ from core.graph.nodes import (
     make_evidence_node,
     make_plan_node,
     make_task_node,
+    make_verify_node,
     planned_waves,
 )
 from core.graph.serde import build_serializer
@@ -209,6 +210,7 @@ def build_graph(
     graph.add_node("evidence", make_evidence_node(ctx))  # type: ignore[call-overload]
     graph.add_node("analysis", make_analysis_node(ctx))  # type: ignore[call-overload]
     graph.add_node("claims", make_claims_node(ctx))  # type: ignore[call-overload]
+    graph.add_node("verify", make_verify_node(ctx))  # type: ignore[call-overload]
 
     route = make_router(max_iterations)
     graph.add_edge(START, "analyze")
@@ -226,7 +228,8 @@ def build_graph(
     graph.add_edge("research_task", "dispatch")
     graph.add_conditional_edges("evidence", route, {"continue": "analysis", "stop": END})
     graph.add_edge("analysis", "claims")
-    graph.add_edge("claims", END)
+    graph.add_conditional_edges("claims", route, {"continue": "verify", "stop": END})
+    graph.add_edge("verify", END)
 
     return graph.compile(checkpointer=checkpointer)
 

@@ -253,6 +253,7 @@ class ResearchRepository:
         if not run.claims:
             return
 
+        verdicts = run.verification.verdicts if run.verification else {}
         rows: list[dict[str, Any]] = []
         link_rows: list[dict[str, Any]] = []
         for claim in run.claims:
@@ -266,6 +267,7 @@ class ResearchRepository:
                 )
                 continue
 
+            verdict = verdicts.get(claim.id)
             rows.append(
                 {
                     "id": claim.id,
@@ -278,6 +280,14 @@ class ResearchRepository:
                     "merged_from": claim.merged_from,
                     "strength": claim.strength,
                     "conflicts_with": {"claims": claim.conflicts_with},
+                    "disposition": verdict.disposition.value if verdict else None,
+                    "verification_reasoning": verdict.reasoning if verdict else None,
+                    "overgeneralization": verdict.overgeneralization if verdict else None,
+                    "suggested_revision": verdict.suggested_revision if verdict else None,
+                    "follow_up_question": verdict.follow_up_question if verdict else None,
+                    "contradicted_by": {
+                        "evidence": verdict.contradicting_evidence_ids if verdict else []
+                    },
                 }
             )
             link_rows.extend(

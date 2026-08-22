@@ -625,3 +625,123 @@ class TestClaimPersistence:
         await repository.delete_session("res_claims")
 
         assert await repository.get_claims("res_claims") == []
+
+
+class TestVerificationPersistence:
+    async def test_a_verdict_is_stored_beside_the_claim_it_judged(
+        self, db_session: AsyncSession
+    ) -> None:
+        from core.models.analysis import Analysis, AnalysisReport, Confidence, Finding
+        from core.models.claim import ClaimStatus, build_claims
+        from core.models.evidence import EvidenceExtractionReport
+        from core.models.verification import ClaimVerification, Disposition, VerificationReport
+
+        run = ResearchRun(
+            research_id="res_verified",
+            question="How does Kafka order records?",
+            depth=ResearchDepth.QUICK,
+        )
+        source = make_source()
+        evidence = make_evidence()
+        run.task_results = [
+            TaskResult(
+                task_id="ordering",
+                question="How are records ordered?",
+                sources=[source],
+                verdict=SufficiencyVerdict.SUFFICIENT,
+                stop_reason="evidence is sufficient",
+                rounds=1,
+            )
+        ]
+        run.evidence_report = EvidenceExtractionReport(evidence=[evidence], sources_processed=1)
+        analysis = Analysis(
+            summary="The evidence describes partition-level ordering guarantees.",
+            findings=[
+                Finding(
+                    statement="Kafka always preserves record order.",
+                    evidence_ids=[evidence.id],
+                    confidence=Confidence.MODERATE,
+                )
+            ],
+        )
+        run.analysis_report = AnalysisReport(analysis=analysis, evidence_considered=1)
+        run.claim_set = build_claims(analysis, [evidence], research_id=run.research_id)
+        claim_id = run.claims[0].id
+        run.claim_set.claims[0] = run.claim_set.claims[0].model_copy(
+            update={"status": ClaimStatus.PARTIALLY_SUPPORTED}
+        )
+        run.verification = VerificationReport(
+            verdicts={
+                claim_id: ClaimVerification(
+                    verdict=ClaimStatus.PARTIALLY_SUPPORTED,
+                    disposition=Disposition.REVISE,
+                    reasoning="The passage states ordering within a partition, not always.",
+                    supporting_evidence_ids=[evidence.id],
+                    contradicting_evidence_ids=[],
+                    overgeneralization="the claim says 'always', which no passage states",
+                    suggested_revision="Kafka preserves record order within a partition.",
+                )
+            },
+            evidence_compared=1,
+        )
+
+        repository = ResearchRepository(db_session)
+        await repository.save_run(run)
+        stored = await repository.get_claims("res_verified")
+
+        assert stored[0].status == "partially_supported"
+        assert stored[0].disposition == "revise"
+        assert stored[0].overgeneralization is not None
+        assert stored[0].suggested_revision is not None
+
+    async def test_only_publishable_claims_can_be_queried_for_a_report(
+        self, db_session: AsyncSession
+    ) -> None:
+        """A report asks for what survived checking. An unsupported claim must
+        not be one query away from looking verified."""
+        from core.models.claim import Claim, ClaimSet, ClaimStatus, EvidenceLink
+        from core.models.evidence import EvidenceExtractionReport
+
+        run = ResearchRun(
+            research_id="res_filtered",
+            question="q",
+            depth=ResearchDepth.QUICK,
+        )
+        source = make_source()
+        evidence = make_evidence()
+        run.task_results = [
+            TaskResult(
+                task_id="ordering",
+                question="How are records ordered?",
+                sources=[source],
+                verdict=SufficiencyVerdict.SUFFICIENT,
+                stop_reason="evidence is sufficient",
+                rounds=1,
+            )
+        ]
+        run.evidence_report = EvidenceExtractionReport(evidence=[evidence], sources_processed=1)
+        link = EvidenceLink(evidence_id=evidence.id, source_id=source.id, weight=0.9, verbatim=True)
+        run.claim_set = ClaimSet(
+            claims=[
+                Claim(
+                    id="res_filtered:find_1",
+                    text="A claim the checker supported.",
+                    status=ClaimStatus.SUPPORTED,
+                    evidence=[link],
+                ),
+                Claim(
+                    id="res_filtered:find_2",
+                    text="A claim the checker refused.",
+                    status=ClaimStatus.UNSUPPORTED,
+                    evidence=[link],
+                ),
+            ]
+        )
+
+        repository = ResearchRepository(db_session)
+        await repository.save_run(run)
+
+        assert len(await repository.get_claims("res_filtered")) == 2
+        supported = await repository.get_claims("res_filtered", status="supported")
+        assert [claim.id for claim in supported] == ["res_filtered:find_1"]
+        assert run.publishable_claims == [run.claims[0]]

@@ -270,6 +270,24 @@ class ClaimRow(Base):
     report orders by it across a whole run and a computed sort cannot use an
     index."""
 
+    disposition: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    verification_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    overgeneralization: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suggested_revision: Mapped[str | None] = mapped_column(Text, nullable=True)
+    follow_up_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """What verification concluded, kept beside the claim it judged.
+
+    On the claim rather than in a table of its own: there is exactly one verdict
+    per claim, and a one-to-one table is a join that buys nothing. The
+    contradicting passages it found are edges, and those do have a table."""
+
+    contradicted_by: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    """Evidence ids that undercut this claim.
+
+    The most valuable output of verification: a passage from another task that
+    disagrees with a claim, which nothing before this stage brought into contact
+    with it."""
+
     conflicts_with: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     """Ids of the claims this one contradicts.
 

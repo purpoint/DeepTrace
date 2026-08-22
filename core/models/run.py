@@ -23,6 +23,7 @@ from core.models.plan import ResearchPlan
 from core.models.query import QuerySpec
 from core.models.research import TaskResult
 from core.models.source import Source
+from core.models.verification import VerificationReport
 from core.observability.recorder import InMemoryRunRecorder
 
 
@@ -39,6 +40,7 @@ class ResearchRun:
     evidence_report: EvidenceExtractionReport | None = None
     analysis_report: AnalysisReport | None = None
     claim_set: ClaimSet | None = None
+    verification: VerificationReport | None = None
     elapsed_seconds: float = 0.0
     error: str | None = None
     usage: InMemoryRunRecorder = field(default_factory=InMemoryRunRecorder)
@@ -63,6 +65,14 @@ class ResearchRun:
     @property
     def claims(self) -> list[Claim]:
         return self.claim_set.claims if self.claim_set else []
+
+    @property
+    def publishable_claims(self) -> list[Claim]:
+        """The claims a report may state.
+
+        What "shows its work" means at the end: a run publishes what survived
+        checking and says plainly that the rest did not."""
+        return self.claim_set.publishable if self.claim_set else []
 
     @property
     def sources(self) -> list[Source]:

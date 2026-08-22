@@ -29,6 +29,7 @@ from typing import TypedDict
 
 from core.agents.analyst import AnalystAgent
 from core.agents.evidence import EvidenceAgent
+from core.agents.fact_checker import FactChecker
 from core.agents.planner import ResearchPlanner
 from core.agents.query_analyzer import QueryAnalyzer
 from core.agents.researcher import ResearchAgent
@@ -464,14 +465,65 @@ def make_claims_node(ctx: NodeContext) -> NodeFn:  # noqa: ARG001 - symmetry wit
             merged=sum(claim.merged_from - 1 for claim in claims.claims),
             rejected=len(claims.rejected),
         )
+        return {
+            "claims": claims,
+            "errors": problems,
+            **_advance(ResearchStatus.VERIFYING),
+        }
+
+    return derive
+
+
+def make_verify_node(ctx: NodeContext) -> NodeFn:
+    """Check each claim against the evidence, including evidence it did not cite.
+
+    The last stage, and the only adversarial one. Everything before it asks what
+    the evidence supports; this asks whether a specific statement is supported,
+    and brings in passages from other tasks that were never compared against it.
+    """
+
+    async def verify(state: ResearchState) -> ResearchState:
+        claims = state.get("claims")
+        if claims is None or not claims.claims:
+            return {**_advance(ResearchStatus.COMPLETED)}
+
+        spec = state.get("spec")
+        question = spec.normalized_question if spec else state["question"]
+
+        try:
+            checked, report = await FactChecker(ctx.client).check(
+                claims,
+                state.get("evidence", []),
+                question=question,
+                research_id=state.get("research_id"),
+            )
+        except Exception as exc:
+            if _interrupted(exc):
+                raise
+            # Unverified claims are still claims, and the evidence behind them
+            # is still collected. A failed check must not mark them refuted:
+            # failing to check something is not evidence against it.
+            log.warning(
+                "graph.verification_failed",
+                research_id=state.get("research_id"),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return {
+                "errors": [f"verification: {type(exc).__name__}: {exc}"],
+                **_advance(ResearchStatus.COMPLETED),
+            }
+
+        problems = [f"claim unverified: {claim_id}" for claim_id, _ in report.failed]
         log.info(
             "graph.finished",
             **{**state_summary(state), "status": ResearchStatus.COMPLETED.value},
         )
         return {
-            "claims": claims,
+            "claims": checked,
+            "verification": report,
             "errors": problems,
             **_advance(ResearchStatus.COMPLETED),
         }
 
-    return derive
+    return verify

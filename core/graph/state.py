@@ -37,6 +37,7 @@ from core.models.plan import ResearchPlan
 from core.models.query import QuerySpec
 from core.models.research import TaskResult
 from core.models.source import Source
+from core.models.verification import VerificationReport
 
 
 class ResearchStatus(StrEnum):
@@ -49,6 +50,7 @@ class ResearchStatus(StrEnum):
     EXTRACTING = "extracting"
     SYNTHESIZING = "synthesizing"
     CLAIMING = "claiming"
+    VERIFYING = "verifying"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -122,6 +124,13 @@ class ResearchState(TypedDict, total=False):
     concluded, the claims are what can be verified or rejected one at a time,
     and a run that loses either loses part of its trace."""
 
+    verification: VerificationReport | None
+    """What checking the claims concluded, and what it could not check.
+
+    Kept beside the claims rather than folded into them: a claim carries its
+    verdict, and this carries the reasoning, the contradicting passages, and the
+    questions that would settle what is still open."""
+
     sources_processed: Annotated[int, operator.add]
     sources_failed: Annotated[int, operator.add]
     """Summed rather than replaced, for the same reason the lists are appended:
@@ -173,6 +182,7 @@ def initial_state(
         evidence=[],
         analysis=None,
         claims=None,
+        verification=None,
         rejected=[],
         injection_attempts=[],
         sources_processed=0,
@@ -205,6 +215,7 @@ def state_summary(state: ResearchState) -> dict[str, Any]:
         "evidence": len(state.get("evidence", [])),
         "findings": len(analysis.analysis.findings) if (analysis := state.get("analysis")) else 0,
         "claims": len(claims.claims) if (claims := state.get("claims")) else 0,
+        "verified": len(check.verdicts) if (check := state.get("verification")) else 0,
         "rejected": len(state.get("rejected", [])),
         "errors": len(state.get("errors", [])),
     }

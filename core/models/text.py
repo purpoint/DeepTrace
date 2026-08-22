@@ -119,6 +119,41 @@ def content_words(text: str) -> frozenset[str]:
     return meaningful or frozenset(stem(word) for word in words)
 
 
+_SUFFIXES = ("ingly", "edly", "ing", "ies", "ied", "ed", "es", "ly", "s")
+
+
+def fold(word: str) -> str:
+    """Reduce a word to a rough root, for retrieval rather than for comparison.
+
+    More aggressive than :func:`stem`, deliberately, because the two are used
+    where the errors cost different amounts.
+
+    Duplicate detection asks "are these the same question", and a wrong yes
+    deletes a task that should have run -- so it stems minimally and errs
+    towards treating words as distinct.
+
+    Retrieval asks "might this passage bear on this claim", and a wrong no hides
+    a passage that contradicts it, which is the failure verification exists to
+    catch. Missing "ordering" because the claim said "order" is exactly that
+    failure, so this folds harder and errs towards treating words as related.
+
+    Crude by design. A real stemmer is more accurate and much harder to reason
+    about, and the cost of a false match here is one extra passage in a prompt.
+    """
+    lowered = word.lower()
+    for suffix in _SUFFIXES:
+        if len(lowered) - len(suffix) >= 4 and lowered.endswith(suffix):
+            return lowered[: -len(suffix)]
+    return lowered
+
+
+def retrieval_words(text: str) -> frozenset[str]:
+    """Content words folded for retrieval. See :func:`fold`."""
+    words = WORD.findall(text.lower())
+    meaningful = frozenset(fold(word) for word in words if word not in STOPWORDS)
+    return meaningful or frozenset(fold(word) for word in words)
+
+
 def similarity(left: frozenset[str], right: frozenset[str]) -> float:
     """Jaccard similarity: shared words over total distinct words."""
     if not left or not right:

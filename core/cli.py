@@ -342,6 +342,30 @@ def _print_run(
             if stated.conflicts_with:
                 print(f"       conflicts with: {', '.join(stated.conflicts_with)}")
 
+            verdict = run.verification.verdict_for(stated.id) if run.verification else None
+            if verdict is not None:
+                print(_wrap(verdict.reasoning, indent="       "))
+                if verdict.contradicting_evidence_ids:
+                    # The most valuable thing verification finds: a passage
+                    # from elsewhere in the run that undercuts this claim.
+                    print(
+                        "       CONTRADICTED BY: "
+                        f"{', '.join(verdict.contradicting_evidence_ids[:3])}"
+                    )
+                if verdict.overgeneralization:
+                    print(_wrap(f"too broad: {verdict.overgeneralization}", indent="       "))
+                if verdict.suggested_revision:
+                    print(_wrap(f"revise to: {verdict.suggested_revision}", indent="       "))
+
+    if run.verification is not None and run.verification.verdicts:
+        print()
+        print(f"VERIFICATION   {run.verification.summary()}")
+        if run.verification.follow_up_questions:
+            print()
+            print("   WOULD SETTLE WHAT IS STILL OPEN")
+            for follow_up in run.verification.follow_up_questions:
+                print(_wrap(f"? {follow_up}", indent="       "))
+
     print()
     print("COST")
     usage = run.usage
