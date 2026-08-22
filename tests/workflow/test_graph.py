@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+from core.config import ResearchDepth
 from core.graph.nodes import NodeContext
 from core.graph.serde import CHECKPOINTED_TYPES, build_serializer
 from core.graph.state import ResearchStatus, initial_state, state_summary
@@ -734,3 +735,169 @@ class TestTheRunBudgetIsARunBudget:
         final = await run_workflow("q", ctx=ctx, depth=ResearchDepth.QUICK)
 
         assert final["sources_processed"] <= DEPTH_BUDGETS[ResearchDepth.QUICK].max_sources
+
+
+DEEP_ANALYSIS = json.dumps(
+    {
+        "summary": "The evidence describes ordering but leaves retries unsettled.",
+        "findings": [
+            {
+                "statement": "Kafka appends records in the order they are sent.",
+                "evidence_ids": ["E1"],
+                "confidence": "moderate",
+            }
+        ],
+        "tradeoffs": [],
+        "contradictions": [],
+        "recommendations": [],
+        "open_questions": [],
+    }
+)
+NEEDS_MORE = json.dumps(
+    {
+        "verdict": "partially_supported",
+        "disposition": "research_more",
+        "reasoning": "The passage states appends but says nothing about retries.",
+        "supporting_evidence_ids": ["C1"],
+        "contradicting_evidence_ids": [],
+        "follow_up_question": "Do producer retries reorder records when several are in flight?",
+    }
+)
+SETTLED = json.dumps(
+    {
+        "verdict": "supported",
+        "disposition": "pass",
+        "reasoning": "The passages state the claim directly.",
+        "supporting_evidence_ids": ["C1"],
+        "contradicting_evidence_ids": [],
+    }
+)
+
+
+def make_loop_ctx(
+    *, depth: ResearchDepth, verdicts: list[str], pages: int = 1
+) -> tuple[NodeContext, StubSearch]:
+    """A context whose fact checker asks for more research, then settles."""
+    answers = iter(verdicts)
+
+    class Verdicts(SchemaRoutedProvider):
+        async def complete(self, request: object) -> object:
+            if request.schema_name == "fact_checker":  # type: ignore[attr-defined]
+                self.by_schema["fact_checker"] = next(answers, verdicts[-1])
+            return await super().complete(request)  # type: ignore[arg-type]
+
+    provider = Verdicts(
+        {
+            "query_analyzer": SPEC,
+            "planner": PLAN,
+            "query_generator": QUERIES,
+            "sufficiency_check": SUFFICIENT,
+            "evidence_extractor": EVIDENCE,
+            "analyst": DEEP_ANALYSIS,
+            "fact_checker": verdicts[0],
+        }
+    )
+    recorder = InMemoryRunRecorder()
+    client = LLMClient(
+        provider,
+        router=ModelRouter("fake", "cheap-model", "strong-model", "embed-model"),
+        recorder=recorder,
+    )
+
+    class MultiPageSearch(StubSearch):
+        """Returns a different page each call, so a second round finds something."""
+
+        async def search(
+            self, query: str, *, max_results: int = 8, timeout_seconds: float = 30.0
+        ) -> list[SearchResult]:
+            self.calls += 1
+            return [
+                SearchResult(
+                    url=f"https://kafka.apache.org/docs/{self.calls}",
+                    title="Kafka Documentation",
+                    content=PAGE,
+                    provider="stub",
+                )
+            ]
+
+    search = MultiPageSearch()
+    ctx = NodeContext(client=client, search_provider=search, recorder=recorder, depth=depth)
+    return ctx, search
+
+
+class TestAdditionalResearchLoop:
+    """Verification asking for more, and the ceilings that stop it.
+
+    Every stop condition is arithmetic on the state: a budget from the depth
+    setting, a convergence check, and the plan's own duplicate rule. None is a
+    prompt instruction, so no model can decide to keep going.
+    """
+
+    async def test_a_follow_up_sends_the_run_back_to_research(self) -> None:
+        ctx, search = make_loop_ctx(depth=ResearchDepth.STANDARD, verdicts=[NEEDS_MORE, SETTLED])
+        final = await run_workflow("q", ctx=ctx, depth=ResearchDepth.STANDARD)
+
+        assert final["verification_loops"] == 1
+        assert search.calls > 1, "the follow-up question was never researched"
+        assert any(task.id.startswith("followup_") for task in final["plan"].tasks)
+        assert final["status"] == ResearchStatus.COMPLETED.value
+
+    async def test_a_quick_run_never_loops(self) -> None:
+        """Quick allows zero verification loops. The budget is the depth
+        setting's business, not the checker's."""
+        ctx, search = make_loop_ctx(depth=ResearchDepth.QUICK, verdicts=[NEEDS_MORE])
+        before = search.calls
+        final = await run_workflow("q", ctx=ctx, depth=ResearchDepth.QUICK)
+
+        assert final["verification_loops"] == 0
+        assert search.calls == before + 1
+
+    async def test_the_loop_budget_is_a_ceiling(self) -> None:
+        """A checker that asks for more every time still stops."""
+        ctx, _ = make_loop_ctx(
+            depth=ResearchDepth.STANDARD, verdicts=[NEEDS_MORE, NEEDS_MORE, NEEDS_MORE]
+        )
+        final = await run_workflow("q", ctx=ctx, depth=ResearchDepth.STANDARD)
+
+        assert final["verification_loops"] == 1  # standard allows one
+        assert final["status"] == ResearchStatus.COMPLETED.value
+
+    async def test_a_second_round_does_not_re_extract_the_first_round_s_sources(self) -> None:
+        """Extraction is one model call per source and the largest line item in
+        a run. A loop that re-read what it already read would pay the whole
+        cost again to learn nothing."""
+        ctx, _ = make_loop_ctx(depth=ResearchDepth.STANDARD, verdicts=[NEEDS_MORE, SETTLED])
+        final = await run_workflow("q", ctx=ctx, depth=ResearchDepth.STANDARD)
+
+        extracted = final["extracted_source_ids"]
+        assert len(extracted) == len(set(extracted)), "a source was extracted twice"
+
+    async def test_a_duplicate_follow_up_is_refused_by_the_plan(self) -> None:
+        """Duplicate prevention is the planner's existing rule, not a second
+        definition living in the loop."""
+        repeat = json.dumps(
+            {
+                "verdict": "partially_supported",
+                "disposition": "research_more",
+                "reasoning": "The evidence does not settle this.",
+                "supporting_evidence_ids": ["C1"],
+                "contradicting_evidence_ids": [],
+                "follow_up_question": "How are records ordered in a partition?",
+            }
+        )
+        ctx, search = make_loop_ctx(depth=ResearchDepth.DEEP, verdicts=[repeat])
+        before = search.calls
+        final = await run_workflow("q", ctx=ctx, depth=ResearchDepth.DEEP)
+
+        assert final["verification_loops"] == 0
+        assert search.calls == before + 1
+        assert any("duplicate" in problem for problem in final["errors"])
+
+    async def test_the_loop_cannot_run_forever(self) -> None:
+        """The iteration ceiling bounds this cycle like every other path, so a
+        budget misconfigured to something large still terminates."""
+        ctx, _ = make_loop_ctx(depth=ResearchDepth.DEEP, verdicts=[NEEDS_MORE] * 10)
+        final = await run_workflow("q", ctx=ctx, depth=ResearchDepth.DEEP, max_iterations=12)
+
+        assert ResearchStatus(final["status"]).is_terminal
+        assert final["iteration"] <= 14

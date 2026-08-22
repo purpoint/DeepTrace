@@ -131,6 +131,27 @@ class ResearchState(TypedDict, total=False):
     verdict, and this carries the reasoning, the contradicting passages, and the
     questions that would settle what is still open."""
 
+    extracted_source_ids: Annotated[list[str], operator.add]
+    """Sources extraction has already read.
+
+    Extraction is one model call per source and the largest line item in a run,
+    so a second research loop must not pay for the first loop's sources again.
+    Appended rather than replaced because extraction can run several times."""
+
+    verification_loops: Annotated[int, operator.add]
+    """Additional research rounds taken after verification asked for them.
+
+    Compared against the depth budget's ceiling. Summed rather than assigned so
+    the count survives however many nodes contribute to it, and so it cannot be
+    reset by a node that forgot the previous value."""
+
+    evidence_at_last_loop: int
+    """How much evidence existed when the last loop was decided.
+
+    The stop condition that matters most: a loop that researched more and
+    produced no new evidence has found what is available, and running it again
+    spends money to confirm that."""
+
     sources_processed: Annotated[int, operator.add]
     sources_failed: Annotated[int, operator.add]
     """Summed rather than replaced, for the same reason the lists are appended:
@@ -183,6 +204,9 @@ def initial_state(
         analysis=None,
         claims=None,
         verification=None,
+        extracted_source_ids=[],
+        verification_loops=0,
+        evidence_at_last_loop=0,
         rejected=[],
         injection_attempts=[],
         sources_processed=0,
@@ -216,6 +240,7 @@ def state_summary(state: ResearchState) -> dict[str, Any]:
         "findings": len(analysis.analysis.findings) if (analysis := state.get("analysis")) else 0,
         "claims": len(claims.claims) if (claims := state.get("claims")) else 0,
         "verified": len(check.verdicts) if (check := state.get("verification")) else 0,
+        "loops": state.get("verification_loops", 0),
         "rejected": len(state.get("rejected", [])),
         "errors": len(state.get("errors", [])),
     }

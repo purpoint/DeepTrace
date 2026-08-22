@@ -321,6 +321,17 @@ class EvidenceExtractionReport(BaseModel):
     sources_processed: int = 0
     sources_failed: int = 0
 
+    extracted_source_ids: list[str] = Field(
+        default_factory=list,
+        description="Exactly the sources read, after deduplication and the budget cap.",
+    )
+    """Reported rather than inferred by the caller.
+
+    Selection collapses duplicates and drops what the budget cannot afford, so
+    "the sources handed in, truncated" is not the same list as "the sources
+    read". A later pass that skipped the wrong ones would either re-read a
+    source it already paid for or never read one it collected."""
+
     duplicates_collapsed: int = 0
     """Sources dropped because another source was the same page.
 

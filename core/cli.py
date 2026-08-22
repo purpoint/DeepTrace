@@ -359,7 +359,13 @@ def _print_run(
 
     if run.verification is not None and run.verification.verdicts:
         print()
-        print(f"VERIFICATION   {run.verification.summary()}")
+        rounds = (
+            f"   (after {run.research_loops} extra research round"
+            f"{'s' if run.research_loops > 1 else ''})"
+            if run.research_loops
+            else ""
+        )
+        print(f"VERIFICATION   {run.verification.summary()}{rounds}")
         if run.verification.follow_up_questions:
             print()
             print("   WOULD SETTLE WHAT IS STILL OPEN")

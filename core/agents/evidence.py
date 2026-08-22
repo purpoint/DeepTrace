@@ -175,6 +175,7 @@ class EvidenceAgent:
 
         report = EvidenceExtractionReport(
             sources_processed=len(usable),
+            extracted_source_ids=[source.id for source in usable],
             duplicates_collapsed=len(with_content) - collapsed,
             over_budget=max(0, collapsed - len(usable)),
         )

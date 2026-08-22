@@ -28,6 +28,15 @@ from pydantic import BaseModel, Field, model_validator
 from core.models.text import content_words, similarity
 
 _TASK_ID = re.compile(r"^[a-z0-9]+(?:[_-][a-z0-9]+)*$")
+FOLLOW_UP_PREFIX = "followup_"
+"""Marks a task that verification asked for rather than the planner.
+
+Follow-ups are exempt from the ``--max-tasks`` limit, which exists to keep a
+smoke test cheap by truncating the *planner's* output. A follow-up exists
+because a claim could not be settled, and silently discarding it would turn a
+debugging convenience into a gap in the verification it was asked to close.
+"""
+
 DUPLICATE_SIMILARITY_THRESHOLD = 0.85
 """Jaccard similarity above which two task questions count as duplicates.
 
@@ -253,6 +262,64 @@ class ResearchPlan(BaseModel):
     def max_parallelism(self) -> int:
         """Largest number of tasks runnable at once, before concurrency limits."""
         return max((len(wave) for wave in self.execution_waves()), default=0)
+
+    def with_follow_ups(
+        self, questions: list[str], *, priority: TaskPriority = TaskPriority.HIGH
+    ) -> tuple[ResearchPlan, list[str]]:
+        """Extend the plan with follow-up research, dropping what it already covers.
+
+        Returns the extended plan and the questions that were refused, so a
+        caller can tell "nothing new to ask" from "asked for three more things".
+
+        Duplicate prevention is the plan's existing rule, not a new one: a plan
+        refuses two tasks asking effectively the same question, so a follow-up
+        that repeats existing coverage cannot be added. Re-running a search that
+        already ran spends the same money for the same result, and the check
+        that stops it is the one that already stopped the planner doing it.
+
+        Each follow-up depends on every task already in the plan. That is not
+        bookkeeping -- it is what places it in a later wave, so the dispatcher
+        runs the follow-ups after the research that prompted them instead of
+        alongside work that has already finished.
+        """
+        existing = list(self.tasks)
+        depends_on = [task.id for task in existing]
+        accepted: list[ResearchTask] = []
+        refused: list[str] = []
+
+        for index, question in enumerate(questions, start=1):
+            candidate = ResearchTask(
+                id=f"{FOLLOW_UP_PREFIX}{len(existing) + len(accepted) + index}",
+                question=question,
+                priority=priority,
+                dependencies=depends_on,
+                parallelizable=True,
+            )
+            try:
+                # Built through the plan's own validation rather than compared
+                # here, so there is one definition of a duplicate task and it
+                # cannot drift from the planner's.
+                ResearchPlan(
+                    objective=self.objective,
+                    tasks=[*existing, *accepted, candidate],
+                    completion_criteria=self.completion_criteria,
+                )
+            except ValueError as exc:
+                refused.append(f"{question}: {exc}")
+                continue
+            accepted.append(candidate)
+
+        if not accepted:
+            return self, refused
+
+        return (
+            ResearchPlan(
+                objective=self.objective,
+                tasks=[*existing, *accepted],
+                completion_criteria=self.completion_criteria,
+            ),
+            refused,
+        )
 
     def task(self, task_id: str) -> ResearchTask:
         for candidate in self.tasks:

@@ -38,7 +38,7 @@ from core.graph.state import ResearchState, ResearchStatus, state_summary
 from core.llm.client import LLMClient
 from core.logging import get_logger
 from core.models.claim import build_claims
-from core.models.plan import ResearchPlan, ResearchTask
+from core.models.plan import FOLLOW_UP_PREFIX, ResearchPlan, ResearchTask
 from core.models.query import QuerySpec
 from core.observability.recorder import RunRecorder
 from core.tools.search import SearchProvider
@@ -227,12 +227,18 @@ def planned_waves(plan: ResearchPlan, max_tasks: int | None) -> list[list[Resear
     what survived. Filtering after scheduling rather than before keeps one
     definition of the dependency order -- the plan's -- instead of a second one
     here that could disagree with it.
+
+    Follow-up tasks are exempt. The limit exists to keep a smoke test cheap by
+    truncating what the *planner* produced; a follow-up exists because a claim
+    could not be settled, and dropping it would turn a debugging convenience
+    into a hole in the verification that asked for it.
     """
     waves = plan.execution_waves()
     if max_tasks is None:
         return waves
 
     allowed = {task.id for task in plan.tasks[:max_tasks]}
+    allowed |= {task.id for task in plan.tasks if task.id.startswith(FOLLOW_UP_PREFIX)}
     kept = [[task for task in wave if task.id in allowed] for wave in waves]
     return [wave for wave in kept if wave]
 
@@ -326,16 +332,34 @@ def make_evidence_node(ctx: NodeContext) -> NodeFn:
     """Extract verified evidence from the collected sources."""
 
     async def extract(state: ResearchState) -> ResearchState:
-        sources = state.get("sources", [])
         spec = state.get("spec")
         question = spec.normalized_question if spec else state["question"]
 
+        # Only what has not been read yet. Extraction is one model call per
+        # source, so a second research loop re-reading the first loop's sources
+        # would pay the run's largest cost again to learn nothing new.
+        already = set(state.get("extracted_source_ids", []))
+        fresh = [source for source in state.get("sources", []) if source.id not in already]
+
+        # The budget is a ceiling on the run, not on each pass, so what earlier
+        # passes spent comes off what this one may.
+        remaining = max(0, DEPTH_BUDGETS[ctx.depth].max_sources - len(already))
+        if not fresh or not remaining:
+            log.info(
+                "graph.extraction_skipped",
+                research_id=state.get("research_id"),
+                already_extracted=len(already),
+                new_sources=len(fresh),
+                budget_remaining=remaining,
+            )
+            return {**_advance(ResearchStatus.SYNTHESIZING)}
+
         try:
             report = await EvidenceAgent(ctx.client).extract(
-                sources,
+                fresh,
                 question=question,
                 research_id=state.get("research_id"),
-                limit=DEPTH_BUDGETS[ctx.depth].max_sources,
+                limit=remaining,
             )
         except Exception as exc:
             if _interrupted(exc):
@@ -361,6 +385,7 @@ def make_evidence_node(ctx: NodeContext) -> NodeFn:
         status = ResearchStatus.FAILED if produced_nothing else ResearchStatus.SYNTHESIZING
         update: ResearchState = {
             "evidence": report.evidence,
+            "extracted_source_ids": report.extracted_source_ids,
             "rejected": report.rejected,
             "injection_attempts": report.injection_attempts,
             "sources_processed": report.sources_processed,
@@ -515,15 +540,115 @@ def make_verify_node(ctx: NodeContext) -> NodeFn:
             }
 
         problems = [f"claim unverified: {claim_id}" for claim_id, _ in report.failed]
-        log.info(
-            "graph.finished",
-            **{**state_summary(state), "status": ResearchStatus.COMPLETED.value},
-        )
-        return {
+        update: ResearchState = {
             "claims": checked,
             "verification": report,
             "errors": problems,
-            **_advance(ResearchStatus.COMPLETED),
         }
 
+        scheduled, research_again = _schedule_follow_ups(state, report.follow_up_questions, ctx)
+        if not research_again:
+            log.info(
+                "graph.finished",
+                **{**state_summary(state), "status": ResearchStatus.COMPLETED.value},
+            )
+            return {**update, **scheduled, **_advance(ResearchStatus.COMPLETED)}
+
+        return {**update, **scheduled, **_advance(ResearchStatus.RESEARCHING)}
+
     return verify
+
+
+def _schedule_follow_ups(
+    state: ResearchState, questions: list[str], ctx: NodeContext
+) -> tuple[ResearchState, bool]:
+    """Decide whether to research again, and set up the round if so.
+
+    Returns the state to write and whether the run continues. The state is
+    written either way: a follow-up refused as a duplicate is a fact about the
+    run -- verification asked for something and the plan already covered it --
+    and dropping it silently would leave no trace that anything was asked.
+
+    Three ways the answer is no, and each is a ceiling rather than a judgement,
+    so no prompt can argue past one:
+
+    *Nothing to ask.* Verification settled everything it could, or the
+    follow-ups it proposed only repeated the question already asked.
+
+    *The budget is spent.* ``max_verification_loops`` is zero for a quick run,
+    one for standard, three for deep. A loop costs a full research round plus a
+    fresh analysis and a re-check of every claim, so it is the depth setting's
+    business how many a run may have.
+
+    *The last loop found nothing.* If the previous round of research produced no
+    new evidence, another round searches the same web for the same answers. This
+    is the same convergence rule the research loop already uses one level down,
+    applied to the loop above it.
+
+    The new tasks go through the plan, which refuses one that repeats existing
+    coverage -- so duplicate prevention is the planner's rule rather than a
+    second definition living here.
+    """
+    if not questions:
+        return {}, False
+
+    plan = state.get("plan")
+    if plan is None:  # pragma: no cover - verification implies a plan
+        return {}, False
+
+    taken = state.get("verification_loops", 0)
+    allowed = DEPTH_BUDGETS[ctx.depth].max_verification_loops
+    if taken >= allowed:
+        log.info(
+            "graph.follow_up_budget_spent",
+            research_id=state.get("research_id"),
+            loops_taken=taken,
+            allowed=allowed,
+            unasked=len(questions),
+        )
+        return {
+            "errors": [
+                f"follow-up not researched, loop budget spent: {question}" for question in questions
+            ]
+        }, False
+
+    evidence_now = len(state.get("evidence", []))
+    if taken and evidence_now <= state.get("evidence_at_last_loop", 0):
+        log.info(
+            "graph.follow_up_converged",
+            research_id=state.get("research_id"),
+            evidence=evidence_now,
+            loops_taken=taken,
+        )
+        return {
+            "errors": ["follow-up not researched, the previous round produced no new evidence"]
+        }, False
+
+    extended, refused = plan.with_follow_ups(questions)
+    problems = [f"follow-up refused as duplicate: {reason}" for reason in refused]
+    if extended is plan:
+        log.info(
+            "graph.follow_ups_all_duplicates",
+            research_id=state.get("research_id"),
+            refused=len(refused),
+        )
+        return {"errors": problems}, False
+
+    waves = planned_waves(extended, ctx.max_tasks)
+    log.info(
+        "graph.researching_again",
+        research_id=state.get("research_id"),
+        loop=taken + 1,
+        tasks=len(extended.tasks) - len(plan.tasks),
+        refused_duplicates=len(refused),
+    )
+    return {
+        "plan": extended,
+        # Rewound so the dispatcher's next pass hands out the wave the
+        # follow-ups landed in. It increments before reading, so this is one
+        # short of the wave count rather than equal to it.
+        "wave": len(waves) - 1,
+        "verification_loops": 1,
+        "evidence_at_last_loop": evidence_now,
+        "errors": problems,
+    }, True

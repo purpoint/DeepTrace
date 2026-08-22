@@ -168,6 +168,32 @@ def make_dispatch_router(
     return dispatch_to
 
 
+def make_loop_router(
+    max_iterations: int, max_tasks: int | None
+) -> Callable[[ResearchState], Literal["research_again", "stop"]]:
+    """Decide whether verification's follow-up research runs.
+
+    Reads state rather than a flag. The verify node extends the plan when it
+    wants another round, so "is there an undispatched wave" is the question --
+    and it is answered by the same wave arithmetic the dispatcher uses, so the
+    two cannot disagree about what is left to do.
+    """
+    stop = make_router(max_iterations)
+
+    def route(state: ResearchState) -> Literal["research_again", "stop"]:
+        if stop(state) == "stop":
+            return "stop"
+
+        plan = state.get("plan")
+        if plan is None:
+            return "stop"
+
+        remaining = len(planned_waves(plan, max_tasks)) - state.get("wave", 0)
+        return "research_again" if remaining > 0 else "stop"
+
+    return route
+
+
 def memory_checkpointer() -> Any:
     """An in-process checkpointer, for tests and single-process runs.
 
@@ -229,7 +255,14 @@ def build_graph(
     graph.add_conditional_edges("evidence", route, {"continue": "analysis", "stop": END})
     graph.add_edge("analysis", "claims")
     graph.add_conditional_edges("claims", route, {"continue": "verify", "stop": END})
-    graph.add_edge("verify", END)
+    # The additional-research loop. Verification extends the plan when a claim
+    # could not be settled; routing sends the run back to research if it did,
+    # and the same iteration ceiling bounds this cycle as every other path.
+    graph.add_conditional_edges(
+        "verify",
+        make_loop_router(max_iterations, ctx.max_tasks),
+        {"research_again": "dispatch", "stop": END},
+    )
 
     return graph.compile(checkpointer=checkpointer)
 

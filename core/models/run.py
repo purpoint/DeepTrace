@@ -46,6 +46,13 @@ class ResearchRun:
     usage: InMemoryRunRecorder = field(default_factory=InMemoryRunRecorder)
     """Every model and tool call this run made, for the cost and trace summary."""
 
+    research_loops: int = 0
+    """Extra research rounds verification asked for and the budget allowed.
+
+    Reported because it changes how the numbers read: a run that researched
+    twice collected its sources in two passes, and a reader comparing source
+    counts across runs should be able to see that."""
+
     resumed: bool = False
     """Whether this run continued from a checkpoint rather than starting fresh.
 
