@@ -21,7 +21,7 @@ from core.models.query import QuerySpec
 from core.models.source import Source
 from core.observability.recorder import InMemoryRunRecorder
 from core.tools.search import SearchResult
-from tests.fakes import FakeProvider
+from tests.fakes import FakeProvider, SchemaRoutedProvider
 
 pytestmark = [pytest.mark.workflow, pytest.mark.unit]
 
@@ -127,7 +127,9 @@ class TestFullRun:
         final = await run_workflow("How does Kafka order records?", ctx=ctx)
 
         assert final["status"] == ResearchStatus.COMPLETED.value
-        assert final["iteration"] == 4  # analyze, plan, research, evidence
+        # analyze, plan, dispatch, the task, dispatch again to find no wave
+        # left, evidence.
+        assert final["iteration"] == 6
         assert final["spec"] is not None
         assert final["plan"] is not None
         assert len(final["task_results"]) == 1
@@ -436,3 +438,219 @@ class TestObservability:
 
         assert final["research_id"] == "res_fixed"
         assert {r.research_id for r in recorder.agent_runs} == {"res_fixed"}
+
+
+THREE_TASK_PLAN = json.dumps(
+    {
+        "objective": "Establish Kafka ordering behaviour",
+        "tasks": [
+            {
+                "id": "producer_side",
+                "question": "How does a producer preserve order when sending records?",
+                "priority": "high",
+                "dependencies": [],
+                "parallelizable": True,
+                "source_requirements": ["official_docs"],
+            },
+            {
+                "id": "broker_side",
+                "question": "How does a broker append records to a partition log?",
+                "priority": "high",
+                "dependencies": [],
+                "parallelizable": True,
+                "source_requirements": ["official_docs"],
+            },
+            {
+                "id": "consumer_side",
+                "question": "How does a consumer read records back in order?",
+                "priority": "medium",
+                "dependencies": ["producer_side"],
+                "parallelizable": True,
+                "source_requirements": ["official_docs"],
+            },
+        ],
+        "completion_criteria": ["documented"],
+    }
+)
+
+
+class SlowSearch(StubSearch):
+    """Records when each search starts and ends, so overlap is observable.
+
+    Concurrency cannot be asserted from a wall-clock total alone -- a fast
+    machine makes a sequential run look parallel. Overlapping intervals are the
+    actual claim.
+    """
+
+    def __init__(self, delay: float = 0.05) -> None:
+        super().__init__()
+        self.delay = delay
+        self.spans: list[tuple[float, float]] = []
+        self.peak = 0
+        self._live = 0
+
+    async def search(
+        self, query: str, *, max_results: int = 8, timeout_seconds: float = 30.0
+    ) -> list[SearchResult]:
+        import asyncio
+        import time
+
+        self._live += 1
+        self.peak = max(self.peak, self._live)
+        started = time.perf_counter()
+        try:
+            await asyncio.sleep(self.delay)
+            return await super().search(query)
+        finally:
+            self.spans.append((started, time.perf_counter()))
+            self._live -= 1
+
+
+def make_parallel_ctx(
+    *, max_concurrency: int = 5, delay: float = 0.05
+) -> tuple[NodeContext, SlowSearch]:
+    # Routed by prompt rather than queued in order: three researchers interleave,
+    # and a queue would hand the second task's answer to the third -- failing on
+    # the double instead of on the code.
+    provider = SchemaRoutedProvider(
+        {
+            "query_analyzer": SPEC,
+            "planner": THREE_TASK_PLAN,
+            "query_generator": QUERIES,
+            "sufficiency_check": SUFFICIENT,
+            "evidence_extractor": EVIDENCE,
+        }
+    )
+    recorder = InMemoryRunRecorder()
+    client = LLMClient(
+        provider,
+        router=ModelRouter("fake", "cheap-model", "strong-model", "embed-model"),
+        recorder=recorder,
+    )
+    search = SlowSearch(delay)
+    ctx = NodeContext(
+        client=client,
+        search_provider=search,
+        recorder=recorder,
+        max_concurrency=max_concurrency,
+    )
+    return ctx, search
+
+
+class TestParallelResearch:
+    async def test_tasks_in_a_wave_actually_overlap(self) -> None:
+        ctx, search = make_parallel_ctx()
+        final = await run_workflow("q", ctx=ctx)
+
+        assert len(final["task_results"]) == 3
+        assert search.peak > 1, "tasks in the same wave ran one after another"
+
+    async def test_every_task_result_survives_the_merge(self) -> None:
+        """What the reducers are for. Last-write-wins would keep one task's
+        result and silently discard the rest of the wave."""
+        ctx, _ = make_parallel_ctx()
+        final = await run_workflow("q", ctx=ctx)
+
+        assert {result.task_id for result in final["task_results"]} == {
+            "producer_side",
+            "broker_side",
+            "consumer_side",
+        }
+        assert len(final["sources"]) == 3
+
+    async def test_a_dependency_is_researched_after_what_it_depends_on(self) -> None:
+        """The plan's waves are executed, not merely recorded. consumer_side
+        depends on producer_side, so it cannot start until that one is done."""
+        ctx, search = make_parallel_ctx()
+        await run_workflow("q", ctx=ctx)
+
+        first_wave = sorted(search.spans)[:2]
+        last = sorted(search.spans)[2]
+        assert last[0] >= min(end for _, end in first_wave)
+
+    async def test_concurrency_is_bounded(self) -> None:
+        """The bound is what protects search quota and memory. Without it a wide
+        plan opens as many researchers as it has tasks."""
+        ctx, search = make_parallel_ctx(max_concurrency=1)
+        final = await run_workflow("q", ctx=ctx)
+
+        assert len(final["task_results"]) == 3
+        assert search.peak == 1
+
+    async def test_the_ceiling_leaves_room_for_the_largest_legitimate_run(self) -> None:
+        """Fanning out made the step count scale with the plan. A ceiling that
+        did not move with it would truncate the biggest runs rather than guard
+        against runaway ones -- and would do it silently."""
+        from core.config import DEPTH_BUDGETS
+        from core.graph.workflow import DEFAULT_MAX_ITERATIONS
+
+        widest = max(budget.max_tasks for budget in DEPTH_BUDGETS.values())
+
+        # analyze + plan + evidence, one dispatch per wave plus one to discover
+        # there are none left, and one step per task. A fully serial plan has as
+        # many waves as tasks, which is the worst case.
+        worst_case = 2 * widest + 4
+        assert worst_case <= DEFAULT_MAX_ITERATIONS
+
+
+class TestAnInterruptedWave:
+    """The reason research fans out instead of gathering inside one node.
+
+    A task that finished before a sibling raised keeps its result: LangGraph
+    stores a completed task's writes even when the wave as a whole fails, so a
+    resume runs only what is still owed. Gathering inside one node would make
+    the wave a single unit of work, and one task failing would mean paying for
+    every task in it again.
+
+    The guarantee stops at tasks that had finished. A sibling still in flight is
+    cancelled when one task raises, so its work is lost and it re-runs. Measured
+    rather than assumed -- the first version of this test asserted the stronger
+    claim and caught a search being cancelled mid-call.
+    """
+
+    async def test_a_task_that_finished_first_is_not_re_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+
+        from core.agents.researcher import ResearchAgent
+        from core.graph.workflow import resume_workflow
+        from core.llm.errors import LLMServerError
+
+        real_research = ResearchAgent.research
+        already_failed = False
+
+        async def flaky(self: ResearchAgent, task: object, **kwargs: object) -> object:
+            nonlocal already_failed
+            if task.id == "broker_side" and not already_failed:  # type: ignore[attr-defined]
+                already_failed = True
+                # Long enough that producer_side is finished, not merely
+                # started, when this raises. What survives is what completed.
+                await asyncio.sleep(0.3)
+                raise LLMServerError("503 high demand", provider="google")
+            return await real_research(self, task, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(ResearchAgent, "research", flaky)
+
+        ctx, search = make_parallel_ctx()
+        saver = memory_checkpointer()
+        app = build_graph(ctx, checkpointer=saver)
+        config = {"configurable": {"thread_id": "res_wave"}}
+
+        with pytest.raises(LLMServerError):
+            await app.ainvoke(
+                initial_state(research_id="res_wave", question="q", depth="standard"),
+                config=config,
+            )
+
+        # producer_side searched and finished; broker_side raised without ever
+        # reaching a search.
+        assert search.calls == 1
+
+        final = await resume_workflow("res_wave", ctx=ctx, checkpointer=saver)
+
+        assert len(final["task_results"]) == 3
+        # broker_side re-run, then consumer_side in the second wave. A fourth
+        # search would mean producer_side was researched twice -- work that had
+        # already finished and had already been paid for.
+        assert search.calls == 3

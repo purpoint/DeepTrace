@@ -82,3 +82,51 @@ class FakeProvider:
             usage=TokenUsage(input_tokens=len(texts) * 10),
             latency_ms=self._latency_ms,
         )
+
+
+class SchemaRoutedProvider(FakeProvider):
+    """Answers according to what was asked for, not the order it was asked.
+
+    :class:`FakeProvider` returns queued responses in sequence, which is exact
+    and readable while one caller works at a time. Once research tasks run
+    concurrently the order stops being deterministic: three researchers
+    interleave, and a queue hands the second task's answer to the third. The
+    test then fails on the double rather than on the code.
+
+    Routing on ``schema_name`` -- which the client sets to the name of the prompt
+    it is running -- makes the double indifferent to interleaving, so a
+    concurrency test measures concurrency.
+    """
+
+    def __init__(
+        self,
+        by_schema: dict[str, object],
+        *,
+        default: object = "",
+        delay_seconds: float = 0.0,
+        **kwargs: object,
+    ) -> None:
+        super().__init__([default], **kwargs)  # type: ignore[arg-type]
+        self.by_schema = by_schema
+        self.delay_seconds = delay_seconds
+
+    async def complete(self, request: CompletionRequest) -> CompletionResult:
+        self.requests.append(request)
+        self.calls += 1
+
+        if self.delay_seconds:
+            import asyncio
+
+            await asyncio.sleep(self.delay_seconds)
+
+        response = self.by_schema.get(request.schema_name, self._responses[0])
+        if isinstance(response, BaseException):
+            raise response
+
+        return CompletionResult(
+            text=str(response),
+            model=request.model,
+            provider=self.name,
+            usage=TokenUsage(input_tokens=self._input_tokens, output_tokens=self._output_tokens),
+            latency_ms=self._latency_ms,
+        )

@@ -153,8 +153,13 @@ class Settings(BaseSettings):
         description="Bounded parallelism. Protects search quotas, LLM spend, and the database.",
     )
     max_graph_iterations: int = Field(
-        default=25,
-        description="Absolute ceiling on workflow steps. Makes infinite agent loops impossible.",
+        default=60,
+        description=(
+            "Absolute ceiling on workflow steps. Makes infinite agent loops "
+            "impossible. Must exceed what a legitimate run costs: research fans "
+            "out to one step per task plus one per wave, so the worst case is "
+            "2*max_tasks + 4 -- 28 at the deep budget."
+        ),
     )
 
     # -- Observability -----------------------------------------------------

@@ -110,9 +110,21 @@ class ResearchState(TypedDict, total=False):
 
     # -- control -----------------------------------------------------------
     status: str
-    iteration: int
-    """Incremented by every node. Compared against a hard ceiling so a cycle in
-    the graph cannot run forever regardless of what any agent decides."""
+    wave: int
+    """How many waves of the plan have been dispatched.
+
+    Written only by the dispatcher, which runs alone, so it needs no reducer.
+    It is what makes the research loop finite: the plan has a fixed number of
+    waves and the dispatcher advances one per pass."""
+
+    iteration: Annotated[int, operator.add]
+    """Contributed by every node, one each. Compared against a hard ceiling so a
+    cycle in the graph cannot run forever regardless of what any agent decides.
+
+    Summed rather than assigned because research tasks now run concurrently.
+    Concurrent nodes each computing ``current + 1`` would count one step for the
+    whole wave -- and LangGraph refuses two concurrent writes to a key with no
+    reducer, so the alternative is not an undercount but a crash."""
 
     errors: Annotated[list[str], merge_errors]
     error: str | None
@@ -145,6 +157,7 @@ def initial_state(
         sources_processed=0,
         sources_failed=0,
         status=ResearchStatus.QUEUED.value,
+        wave=0,
         iteration=0,
         errors=[],
         error=None,
@@ -164,6 +177,7 @@ def state_summary(state: ResearchState) -> dict[str, Any]:
         "research_id": state.get("research_id"),
         "status": state.get("status"),
         "iteration": state.get("iteration", 0),
+        "wave": state.get("wave", 0),
         "tasks_planned": len(plan.tasks) if plan else 0,
         "tasks_completed": len(state.get("task_results", [])),
         "sources": len(state.get("sources", [])),

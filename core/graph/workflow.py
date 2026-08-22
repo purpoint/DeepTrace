@@ -1,8 +1,25 @@
 """The research workflow graph.
 
-    START -> analyze -> plan -> research -> evidence -> END
-                 |        |         |          |
-                 └────────┴─────────┴──────────┴──> END on failure
+    START -> analyze -> plan -> dispatch -> evidence -> END
+                                  ^  |
+                                  |  +--> research_task (one per task)
+                                  +--------------+
+                                     one pass per wave
+
+Research fans out. The dispatcher sends one task node per task in the current
+wave, the tasks run concurrently, and control returns to the dispatcher for the
+next wave -- so the plan's dependency order is executed, not merely recorded.
+
+A fan-out rather than a gather inside one node, for a reason that only shows up
+when something goes wrong: LangGraph stores the writes of a task that finished
+even when a sibling raises, so an interrupted wave resumes by running what it
+still owes. Gathering inside a node would make the whole wave one unit of work,
+and losing one task would mean paying for all of them again.
+
+The guarantee stops at tasks that had finished. A sibling still in flight is
+cancelled when one task raises, so its work is lost and it re-runs. Measured,
+not assumed: the test that pins this originally asserted the stronger claim and
+caught a search being cancelled mid-call.
 
 Routing lives here, as edges, rather than inside nodes. A node that decided what
 ran next would put the control flow in four places, and reading the sequence
@@ -10,8 +27,8 @@ would mean reading every node instead of one graph definition.
 
 Two guarantees the sequential pipeline could not make:
 
-*Bounded execution.* Every node increments ``iteration``, and routing refuses to
-continue past a ceiling. That is checked in code on every transition, so no
+*Bounded execution.* Every node contributes to ``iteration``, and routing refuses
+to continue past a ceiling. That is checked in code on every transition, so no
 prompt, agent, or future cycle can exceed it.
 
 *Resumability.* With a checkpointer, state is written after each node. A worker
@@ -26,14 +43,17 @@ from collections.abc import Callable
 from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
 
 from core.config import ResearchDepth, Settings, get_settings
 from core.graph.nodes import (
     NodeContext,
     make_analyze_node,
+    make_dispatch_node,
     make_evidence_node,
     make_plan_node,
-    make_research_node,
+    make_task_node,
+    planned_waves,
 )
 from core.graph.serde import build_serializer
 from core.graph.state import ResearchState, ResearchStatus, initial_state
@@ -44,7 +64,19 @@ from core.tools.search import SearchProvider, build_search_provider
 
 log = get_logger(__name__)
 
-DEFAULT_MAX_ITERATIONS = 25
+DEFAULT_MAX_ITERATIONS = 60
+"""Absolute ceiling on node executions.
+
+Sized against what a legitimate run costs rather than picked round. Research
+fans out to one step per task and one per wave, and a plan whose tasks are
+entirely serial has as many waves as tasks -- so the worst case is
+``2 * max_tasks + 4``, which is 28 at the deep budget's twelve tasks.
+
+It was 25 while research was a single sequential node, where any plan cost four
+steps. Fanning out made the step count scale with the plan, and a ceiling that
+does not move with it stops being a guard against runaway loops and becomes a
+silent truncation of the largest legitimate runs.
+"""
 
 
 def make_router(max_iterations: int) -> Callable[[ResearchState], Literal["continue", "stop"]]:
@@ -75,6 +107,52 @@ def make_router(max_iterations: int) -> Callable[[ResearchState], Literal["conti
         return "continue"
 
     return route
+
+
+def make_dispatch_router(
+    max_iterations: int, max_tasks: int | None
+) -> Callable[[ResearchState], Any]:
+    """Decide what the dispatcher hands out next.
+
+    Returns a list of ``Send`` -- one per task in the wave that was just
+    dispatched -- or the name of the node to continue to. Both stop conditions
+    are checked first, by the same router every other transition uses, so the
+    iteration ceiling bounds the research loop as well.
+
+    The wave is read from the plan rather than tracked separately. A second copy
+    of the dependency order living here is a copy that can disagree with the
+    plan's, and the plan's is the one that was validated for cycles.
+    """
+    stop = make_router(max_iterations)
+
+    def dispatch_to(state: ResearchState) -> Any:
+        if stop(state) == "stop":
+            return END
+
+        plan = state.get("plan")
+        if plan is None:  # pragma: no cover - the dispatcher records this first
+            return END
+
+        waves = planned_waves(plan, max_tasks)
+        index = state.get("wave", 0) - 1
+        if index < 0 or index >= len(waves):
+            # Every wave has run, or the plan had no tasks to run at all. Either
+            # way research is over and what was collected goes to extraction.
+            return "evidence"
+
+        return [
+            Send(
+                "research_task",
+                {
+                    "task": task,
+                    "spec": state.get("spec"),
+                    "research_id": state.get("research_id"),
+                },
+            )
+            for task in waves[index]
+        ]
+
+    return dispatch_to
 
 
 def memory_checkpointer() -> Any:
@@ -114,17 +192,24 @@ def build_graph(
     # themselves to satisfy a third party's annotations.
     graph.add_node("analyze", make_analyze_node(ctx))  # type: ignore[call-overload]
     graph.add_node("plan", make_plan_node(ctx))  # type: ignore[call-overload]
-    graph.add_node("research", make_research_node(ctx))  # type: ignore[call-overload]
+    graph.add_node("dispatch", make_dispatch_node())  # type: ignore[call-overload]
+    graph.add_node("research_task", make_task_node(ctx))  # type: ignore[call-overload]
     graph.add_node("evidence", make_evidence_node(ctx))  # type: ignore[call-overload]
 
     route = make_router(max_iterations)
     graph.add_edge(START, "analyze")
-    for source, following in (
-        ("analyze", "plan"),
-        ("plan", "research"),
-        ("research", "evidence"),
-    ):
+    for source, following in (("analyze", "plan"), ("plan", "dispatch")):
         graph.add_conditional_edges(source, route, {"continue": following, "stop": END})
+
+    graph.add_conditional_edges(
+        "dispatch",
+        make_dispatch_router(max_iterations, ctx.max_tasks),
+        ["research_task", "evidence", END],
+    )
+    # Every task in a wave edges back to the dispatcher, which runs once for the
+    # wave rather than once per task: nodes converging on one target in the same
+    # step execute it a single time.
+    graph.add_edge("research_task", "dispatch")
     graph.add_edge("evidence", END)
 
     return graph.compile(checkpointer=checkpointer)
@@ -145,6 +230,7 @@ def build_context(
         search_provider=search_provider or build_search_provider(settings),
         depth=depth,
         max_tasks=max_tasks,
+        max_concurrency=settings.max_concurrent_tasks,
         recorder=recorder,
     )
 
