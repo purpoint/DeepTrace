@@ -37,11 +37,13 @@ from core.llm.base import (
 )
 from core.llm.errors import (
     LLMError,
+    LLMRateLimitError,
     ProviderNotConfiguredError,
     StructuredOutputError,
     UnknownProviderError,
 )
 from core.llm.pricing import estimate_cost
+from core.llm.rate_limit import NullRateLimiter, RateLimiter
 from core.llm.retry import DEFAULT_POLICY, RetryPolicy, with_retries
 from core.logging import get_logger
 from core.observability.recorder import AgentRun, NullRunRecorder, RunRecorder, new_run_id
@@ -134,6 +136,7 @@ class LLMClient:
         retry_policy: RetryPolicy = DEFAULT_POLICY,
         default_timeout: float = 60.0,
         max_repair_attempts: int = 2,
+        rate_limiter: RateLimiter | NullRateLimiter | None = None,
     ) -> None:
         self.provider = provider
         self.router = router
@@ -141,6 +144,10 @@ class LLMClient:
         self.retry_policy = retry_policy
         self.default_timeout = default_timeout
         self.max_repair_attempts = max_repair_attempts
+        # Defaults to unlimited. A limiter is created from settings by
+        # from_settings; constructing a client directly -- as tests do -- should
+        # not silently introduce waiting.
+        self.rate_limiter = rate_limiter or NullRateLimiter()
 
     @classmethod
     def from_settings(
@@ -153,7 +160,26 @@ class LLMClient:
             recorder=recorder,
             retry_policy=RetryPolicy(max_attempts=settings.llm_max_retries),
             default_timeout=settings.llm_timeout_seconds,
+            rate_limiter=RateLimiter(settings.llm_requests_per_minute, name=settings.llm_provider),
         )
+
+    async def _call_provider(self, request: CompletionRequest) -> CompletionResult:
+        """Send one request, waiting for rate-limit budget first.
+
+        Every provider call in this class goes through here, so the limiter
+        cannot be bypassed by a code path that forgot about it -- including the
+        structured-output repair path, which is exactly the traffic that spikes
+        when a run is already under pressure.
+
+        A rate-limit error pauses the shared bucket rather than only failing this
+        call, because a 429 is information about the whole account's budget.
+        """
+        await self.rate_limiter.acquire()
+        try:
+            return await self.provider.complete(request)
+        except LLMRateLimitError as exc:
+            self.rate_limiter.penalise(exc.retry_after or 5.0)
+            raise
 
     # -- recording ---------------------------------------------------------
 
@@ -248,7 +274,7 @@ class LLMClient:
 
         try:
             result = await with_retries(
-                lambda: self.provider.complete(request),
+                lambda: self._call_provider(request),
                 policy=self.retry_policy,
                 operation_name=f"llm.{prompt.name}",
                 on_retry=count_retry,
@@ -430,7 +456,7 @@ class LLMClient:
 
         try:
             result = await with_retries(
-                lambda: self.provider.complete(request),
+                lambda: self._call_provider(request),
                 policy=self.retry_policy,
                 operation_name=f"llm.{prompt.name}.repair",
             )

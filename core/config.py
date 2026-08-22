@@ -129,6 +129,14 @@ class Settings(BaseSettings):
 
     llm_timeout_seconds: float = 60.0
     llm_max_retries: int = 3
+    llm_requests_per_minute: float = Field(
+        default=10.0,
+        description=(
+            "Sustained request rate the client shapes traffic to. Set to the "
+            "provider's published limit; 0 disables limiting. A free tier is "
+            "typically far below what a research run would otherwise issue."
+        ),
+    )
 
     # -- Search ------------------------------------------------------------
     tavily_api_key: str | None = None
