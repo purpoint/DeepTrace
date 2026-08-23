@@ -55,6 +55,7 @@ coverage.xml
 # Node / frontend (apps/web)
 # ---------------------------------------------------------------------------
 node_modules/
+*.tsbuildinfo
 .vite/
 *.local
 

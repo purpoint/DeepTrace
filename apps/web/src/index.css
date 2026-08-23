@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* The report renders untrusted markdown through a component that maps each
+   element explicitly. This is only the wrapper: no descendant selectors that
+   could style something the sanitizer let through in an unexpected shape. */
+.prose-report {
+  max-width: 68ch;
+}

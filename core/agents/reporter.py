@@ -76,15 +76,24 @@ def _interpretation(question: str, spec: QuerySpec | None) -> str:
     if spec is None:
         return question
 
+    # Markdown collapses single newlines, so anything meant to be a separate
+    # line is written as a list item or separated by a blank line. Found by
+    # reading the rendered report: scope and exclusions ran into one paragraph.
     lines = [spec.normalized_question]
     if spec.scope:
         lines.append("")
-        lines.append("Covered: " + "; ".join(spec.scope))
+        lines.append("**Covered**")
+        lines.append("")
+        lines.extend(f"- {item}" for item in spec.scope)
     if spec.out_of_scope:
-        lines.append("Not covered: " + "; ".join(spec.out_of_scope))
+        lines.append("")
+        lines.append("**Not covered**")
+        lines.append("")
+        lines.extend(f"- {item}" for item in spec.out_of_scope)
     if spec.ambiguities:
         lines.append("")
         lines.append("The question was ambiguous in places, and this research assumed:")
+        lines.append("")
         lines.extend(f"- {item.aspect}: {item.assumption}" for item in spec.ambiguities)
     return "\n".join(lines)
 

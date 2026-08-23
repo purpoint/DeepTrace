@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 .PHONY: help setup install lint format typecheck test test-int test-cov check clean run \
-	db-up db-down db-reset db-revision api worker
+	db-up db-down db-reset db-revision api worker web web-install web-check
 
 VENV   := .venv
 PYTHON := $(VENV)/bin/python
@@ -54,6 +54,15 @@ api: ## Run the HTTP API with reload
 
 worker: ## Run a research worker
 	$(PYTHON) -m core.cli work
+
+web: ## Run the browser client (expects the API on :8000)
+	cd apps/web && npm run dev
+
+web-install: ## Install the browser client's dependencies
+	cd apps/web && npm install
+
+web-check: ## Typecheck, test, and build the browser client
+	cd apps/web && npx tsc --noEmit && npx vitest run && npm run build
 
 db-up: ## Apply all pending migrations
 	$(ALEMBIC) upgrade head

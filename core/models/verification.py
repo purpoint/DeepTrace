@@ -172,8 +172,23 @@ class VerificationReport(BaseModel):
         return tally
 
     def summary(self) -> str:
+        """A sentence, not a dump of enum values.
+
+        This string reaches a reader through the report's method section, so
+        "partially_supported" would be an implementation detail leaking into a
+        document written for a person. Found by reading the rendered report.
+        """
+        readable = {
+            "supported": "supported",
+            "partially_supported": "partly supported",
+            "unsupported": "not supported",
+            "conflicting": "disputed by other sources",
+            "proposed": "unchecked",
+        }
         counts = self.counts()
-        parts = [f"{count} {status}" for status, count in sorted(counts.items())]
+        parts = [
+            f"{count} {readable.get(status, status)}" for status, count in sorted(counts.items())
+        ]
         if self.failed:
             parts.append(f"{len(self.failed)} could not be checked")
         return (
