@@ -64,6 +64,7 @@ from core.graph.serde import build_serializer
 from core.graph.state import ResearchState, ResearchStatus, initial_state
 from core.llm.client import LLMClient
 from core.logging import bind_research_context, clear_research_context, get_logger
+from core.observability.progress import NullProgressEmitter, ProgressEmitter
 from core.observability.recorder import RunRecorder, new_run_id
 from core.tools.search import SearchProvider, build_search_provider
 
@@ -277,6 +278,7 @@ def build_context(
     recorder: RunRecorder | None = None,
     depth: ResearchDepth = ResearchDepth.STANDARD,
     max_tasks: int | None = None,
+    progress: ProgressEmitter | None = None,
 ) -> NodeContext:
     """Build node dependencies from configuration."""
     settings = settings or get_settings()
@@ -286,6 +288,7 @@ def build_context(
         depth=depth,
         max_tasks=max_tasks,
         max_concurrency=settings.max_concurrent_tasks,
+        progress=progress or NullProgressEmitter(),
         recorder=recorder,
     )
 

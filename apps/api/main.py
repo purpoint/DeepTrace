@@ -27,7 +27,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from apps.api.errors import install_error_handlers
-from apps.api.routes import research
+from apps.api.routes import events, research
 from apps.api.schemas import HealthResponse
 from core.config import Settings, get_settings
 from core.logging import configure_logging, get_logger
@@ -65,12 +65,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         log.error("api.database_unavailable", error_type=type(exc).__name__, error=str(exc))
 
+    app.state.events = None
+
     try:
+        from infrastructure.queue.events import RedisProgressStream
         from infrastructure.queue.redis_queue import RedisJobQueue
 
         queue = RedisJobQueue.from_settings(settings)
         await queue.client.ping()
         app.state.queue = queue
+
+        # A separate client for the event stream. A connection running a
+        # pub/sub subscription cannot serve ordinary commands, and sharing one
+        # would mean a single WebSocket client blocking every queue operation
+        # the API makes.
+        app.state.events = RedisProgressStream.from_settings(settings)
         log.info("api.queue_ready")
     except Exception as exc:
         log.error("api.queue_unavailable", error_type=type(exc).__name__, error=str(exc))
@@ -80,6 +89,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if app.state.queue is not None:
             await app.state.queue.close()
+        if app.state.events is not None:
+            await app.state.events.close()
         from infrastructure.db.engine import dispose_engine
 
         await dispose_engine()
@@ -122,6 +133,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     install_error_handlers(app)
     app.include_router(research.router)
+    app.include_router(events.router)
 
     @app.get("/health", response_model=HealthResponse, tags=["service"])
     async def health() -> HealthResponse:

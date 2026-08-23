@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypedDict
 
 from core.agents.analyst import AnalystAgent
@@ -41,6 +41,12 @@ from core.logging import get_logger
 from core.models.claim import build_claims
 from core.models.plan import FOLLOW_UP_PREFIX, ResearchPlan, ResearchTask
 from core.models.query import QuerySpec
+from core.observability.progress import (
+    EventKind,
+    NullProgressEmitter,
+    ProgressEmitter,
+    ProgressEvent,
+)
 from core.observability.recorder import RunRecorder
 from core.tools.search import SearchProvider
 
@@ -81,6 +87,14 @@ class NodeContext:
     search quota, open connections, and how much page text is held in memory at
     the same time."""
 
+    progress: ProgressEmitter = field(default_factory=NullProgressEmitter)
+    """Where progress events go while a run is in flight.
+
+    Defaults to a sink that discards them, so a node emits unconditionally and
+    a run without a fan-out layer -- a test, the CLI -- executes exactly the
+    same code. A null check at each emit is one more thing to get wrong at ten
+    call sites."""
+
     recorder: RunRecorder | None = None
     """Where tool calls are recorded.
 
@@ -102,6 +116,29 @@ def _advance(status: ResearchStatus) -> ResearchState:
     step per wave however wide the wave is.
     """
     return {"status": status.value, "iteration": 1}
+
+
+async def _report(
+    ctx: NodeContext,
+    state: ResearchState,
+    kind: EventKind,
+    message: str,
+    **data: object,
+) -> None:
+    """Tell whoever is watching what just happened.
+
+    Never raises. Progress is narration, and a run that fails because the thing
+    describing it failed would be the tail wagging the dog -- so the emitter's
+    own errors are its problem, and this call is safe to make from anywhere.
+    """
+    await ctx.progress.emit(
+        ProgressEvent(
+            research_id=state.get("research_id", "unknown"),
+            kind=kind,
+            message=message,
+            data=dict(data),
+        )
+    )
 
 
 def _interrupted(exc: Exception) -> bool:
@@ -171,6 +208,15 @@ def make_analyze_node(ctx: NodeContext) -> NodeFn:
                 raise
             return _failed(state, "analyze", exc)
 
+        await _report(
+            ctx,
+            state,
+            EventKind.STAGE,
+            "Question analysed; planning the research",
+            stage=ResearchStatus.PLANNING.value,
+            research_type=spec.research_type.value,
+            scope=len(spec.scope),
+        )
         return {"spec": spec, **_advance(ResearchStatus.PLANNING)}
 
     return analyze
@@ -195,6 +241,14 @@ def make_plan_node(ctx: NodeContext) -> NodeFn:
                 raise
             return _failed(state, "plan", exc)
 
+        await _report(
+            ctx,
+            state,
+            EventKind.STAGE,
+            f"Planned {len(research_plan.tasks)} research tasks",
+            stage=ResearchStatus.RESEARCHING.value,
+            tasks=[task.question for task in research_plan.tasks],
+        )
         return {"plan": research_plan, **_advance(ResearchStatus.RESEARCHING)}
 
     return plan
@@ -319,6 +373,19 @@ def make_task_node(ctx: NodeContext) -> Callable[[TaskAssignment], Awaitable[Res
                 }
 
         problems = [] if result.succeeded else [f"task {result.task_id}: {result.stop_reason}"]
+        await ctx.progress.emit(
+            ProgressEvent(
+                research_id=assignment.get("research_id") or "unknown",
+                kind=EventKind.TASK_COMPLETED,
+                message=f"Researched: {task.question[:120]}",
+                data={
+                    "task_id": task.id,
+                    "sources": len(result.usable_sources),
+                    "verdict": result.verdict.value,
+                    "stop_reason": result.stop_reason,
+                },
+            )
+        )
         return {
             "task_results": [result],
             "sources": result.sources,
@@ -397,6 +464,17 @@ def make_evidence_node(ctx: NodeContext) -> NodeFn:
         if produced_nothing:
             update["error"] = "evidence extraction produced no results"
 
+        await _report(
+            ctx,
+            state,
+            EventKind.EVIDENCE_EXTRACTED,
+            f"Extracted {len(report.evidence)} passages and checked each against its source",
+            stage=status.value,
+            evidence=len(report.evidence),
+            verbatim=len(report.verified_evidence),
+            rejected=len(report.rejected),
+            sources_read=report.sources_processed,
+        )
         return update
 
     return extract
@@ -443,6 +521,16 @@ def make_analysis_node(ctx: NodeContext) -> NodeFn:
             }
 
         problems = [f"analysis discarded: {statement}" for statement, _ in report.dropped]
+        await _report(
+            ctx,
+            state,
+            EventKind.STAGE,
+            f"Analysed the evidence: {report.analysis.summary_line()}",
+            stage=ResearchStatus.CLAIMING.value,
+            findings=len(report.analysis.findings),
+            contradictions=len(report.analysis.contradictions),
+            discarded=len(report.dropped),
+        )
         return {
             "analysis": report,
             "errors": problems,
@@ -452,7 +540,7 @@ def make_analysis_node(ctx: NodeContext) -> NodeFn:
     return analyse
 
 
-def make_claims_node(ctx: NodeContext) -> NodeFn:  # noqa: ARG001 - symmetry with the others
+def make_claims_node(ctx: NodeContext) -> NodeFn:
     """Turn the analysis into individually checkable claims.
 
     No model call: the analyst already decided what the evidence supports, and
@@ -490,6 +578,15 @@ def make_claims_node(ctx: NodeContext) -> NodeFn:  # noqa: ARG001 - symmetry wit
             conflicting=len(claims.conflicting_pairs()),
             merged=sum(claim.merged_from - 1 for claim in claims.claims),
             rejected=len(claims.rejected),
+        )
+        await _report(
+            ctx,
+            state,
+            EventKind.STAGE,
+            f"Derived {len(claims.claims)} claims; checking each against the evidence",
+            stage=ResearchStatus.VERIFYING.value,
+            claims=len(claims.claims),
+            conflicting=len(claims.conflicting_pairs()),
         )
         return {
             "claims": claims,
@@ -546,6 +643,15 @@ def make_verify_node(ctx: NodeContext) -> NodeFn:
             "verification": report,
             "errors": problems,
         }
+
+        await _report(
+            ctx,
+            state,
+            EventKind.CLAIMS_VERIFIED,
+            report.summary(),
+            **report.counts(),
+            unchecked=len(report.failed),
+        )
 
         scheduled, research_again = _schedule_follow_ups(state, report.follow_up_questions, ctx)
         if not research_again:
@@ -614,6 +720,15 @@ def make_report_node(ctx: NodeContext) -> NodeFn:
             for claim_id in report.unsupported_claim_ids
         )
 
+        await _report(
+            ctx,
+            state,
+            EventKind.REPORT_READY,
+            f"Report written: {report.summary()}",
+            title=report.title,
+            citations=len(report.citations),
+            fully_cited=report.is_fully_cited,
+        )
         log.info(
             "graph.finished",
             **{**state_summary(state), "status": ResearchStatus.COMPLETED.value},

@@ -36,6 +36,7 @@ from core.graph.workflow import (
 )
 from core.logging import get_logger
 from core.models.run import ResearchRun
+from core.observability.progress import ProgressEmitter
 from core.observability.recorder import (
     InMemoryRunRecorder,
     MultiRunRecorder,
@@ -126,6 +127,7 @@ async def run_research(
     search_provider: SearchProvider | None = None,
     checkpointer: Any | None = None,
     research_id: str | None = None,
+    progress: ProgressEmitter | None = None,
 ) -> ResearchRun:
     """Run the full workflow for one question.
 
@@ -167,6 +169,7 @@ async def run_research(
             recorder=sink,
             depth=depth,
             max_tasks=max_tasks,
+            progress=progress,
         )
         final = await run_workflow(
             question,
@@ -202,6 +205,7 @@ async def resume_research(
     settings: Settings | None = None,
     recorder: RunRecorder | None = None,
     search_provider: SearchProvider | None = None,
+    progress: ProgressEmitter | None = None,
 ) -> ResearchRun:
     """Continue a checkpointed run from wherever it stopped.
 
@@ -234,6 +238,7 @@ async def resume_research(
         recorder=sink,
         depth=depth,
         max_tasks=saved.get("max_tasks"),
+        progress=progress,
     )
 
     log.info("research.resuming", research_id=research_id, status=saved.get("status"))

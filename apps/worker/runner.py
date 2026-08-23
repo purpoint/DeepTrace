@@ -41,6 +41,12 @@ from core.config import Settings, get_settings
 from core.graph.workflow import CheckpointNotFound, load_state
 from core.logging import bind_research_context, clear_research_context, get_logger
 from core.models.run import ResearchRun
+from core.observability.progress import (
+    EventKind,
+    NullProgressEmitter,
+    ProgressEmitter,
+    ProgressEvent,
+)
 from core.observability.recorder import new_run_id
 from core.pipeline import resume_research, run_research
 from infrastructure.queue.job import Job, JobStatus
@@ -76,11 +82,13 @@ class Worker:
         settings: Settings | None = None,
         name: str | None = None,
         checkpointer: Any | None = None,
+        progress: ProgressEmitter | None = None,
     ) -> None:
         self.queue = queue
         self.settings = settings or get_settings()
         self.name = name or f"{socket.gethostname()}:{new_run_id('w')}"
         self.checkpointer = checkpointer
+        self.progress = progress or NullProgressEmitter()
         self._running = True
 
     def stop(self) -> None:
@@ -121,6 +129,13 @@ class Worker:
         impossible for the several minutes it takes.
         """
         bind_research_context(research_id=job.research_id, depth=job.depth.value)
+        await self._announce(
+            job,
+            EventKind.STARTED,
+            f"Researching: {job.question[:150]}",
+            attempt=job.attempts,
+            depth=job.depth.value,
+        )
         keepalive = asyncio.create_task(self._heartbeat(job))
         research = asyncio.create_task(self._research(job))
 
@@ -128,6 +143,7 @@ class Worker:
             cancelled = await self._await_or_cancel(job, research)
             if cancelled:
                 await self.queue.cancelled(job)
+                await self._announce(job, EventKind.CANCELLED, "Research was cancelled.")
                 log.info("worker.job_cancelled", job_id=job.id, research_id=job.research_id)
                 return JobStatus.CANCELLED
 
@@ -137,6 +153,7 @@ class Worker:
             # are returned, so anything raised here is the infrastructure --
             # a checkpoint store that vanished, a credential that expired.
             outcome = await self.queue.fail(job, f"{type(exc).__name__}: {exc}")
+            await self._announce_failure(job, outcome, f"{type(exc).__name__}: {exc}")
             log.warning(
                 "worker.job_failed",
                 job_id=job.id,
@@ -157,11 +174,21 @@ class Worker:
             # outage looks identical from here -- and the next attempt resumes
             # rather than restarting.
             outcome = await self.queue.fail(job, run.error)
+            await self._announce_failure(job, outcome, run.error)
             log.warning("worker.research_failed", job_id=job.id, outcome=outcome.value)
             return outcome
 
         await self._persist(run)
         await self.queue.complete(job)
+        await self._announce(
+            job,
+            EventKind.COMPLETED,
+            "Research complete.",
+            claims=len(run.claims),
+            sources=len(run.sources),
+            evidence=len(run.evidence),
+            elapsed_seconds=run.elapsed_seconds,
+        )
         log.info(
             "worker.job_completed",
             job_id=job.id,
@@ -170,6 +197,37 @@ class Worker:
             claims=len(run.claims),
         )
         return JobStatus.COMPLETED
+
+    async def _announce(self, job: Job, kind: EventKind, message: str, **data: object) -> None:
+        await self.progress.emit(
+            ProgressEvent(
+                research_id=job.research_id,
+                kind=kind,
+                message=message,
+                data={"job_id": job.id, **data},
+            )
+        )
+
+    async def _announce_failure(self, job: Job, outcome: JobStatus, error: str) -> None:
+        """Say whether this is the end, or another attempt.
+
+        A client shown "failed" for a job that is about to be retried will tell
+        a user their research is gone, and then it will finish. The two are
+        different events because they are different news.
+        """
+        retrying = outcome is not JobStatus.DEAD
+        await self._announce(
+            job,
+            EventKind.STARTED if retrying else EventKind.FAILED,
+            (
+                f"Attempt {job.attempts} failed; trying again. ({error[:120]})"
+                if retrying
+                else f"Research failed after {job.attempts} attempts. ({error[:200]})"
+            ),
+            error=error[:300],
+            attempts=job.attempts,
+            will_retry=retrying,
+        )
 
     async def _research(self, job: Job) -> ResearchRun:
         """Start the research, or continue it if this job has run before.
@@ -193,6 +251,7 @@ class Worker:
                         job.research_id,
                         checkpointer=self.checkpointer,
                         settings=self.settings,
+                        progress=self.progress,
                     )
                 except CheckpointNotFound:  # pragma: no cover - raced with expiry
                     pass
@@ -204,6 +263,7 @@ class Worker:
             settings=self.settings,
             checkpointer=self.checkpointer,
             research_id=job.research_id,
+            progress=self.progress,
         )
 
     async def _await_or_cancel(self, job: Job, research: asyncio.Task[ResearchRun]) -> bool:

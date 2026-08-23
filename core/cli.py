@@ -474,10 +474,20 @@ def _work(args: argparse.Namespace) -> int:
     """Run a worker until it is stopped."""
     from apps.worker.runner import Worker, install_signal_handlers
     from infrastructure.db.checkpointer import checkpointer_scope
+    from infrastructure.queue.events import RedisProgressStream
 
     async def execute() -> None:
+        stream = RedisProgressStream.from_settings()
+        try:
+            await _work_with(args, stream)
+        finally:
+            # Closed explicitly: the stream holds its own connection pool, and a
+            # worker restarted in a loop would leak one per restart.
+            await stream.close()
+
+    async def _work_with(args: argparse.Namespace, stream: object) -> None:
         async with _queue() as queue, checkpointer_scope() as saver:
-            worker = Worker(queue, checkpointer=saver)
+            worker = Worker(queue, checkpointer=saver, progress=stream)  # type: ignore[arg-type]
             install_signal_handlers(worker)
 
             if args.once:

@@ -41,6 +41,7 @@ dependencies = [
     "redis>=5.0",             # job queue and progress fan-out (asyncio client)
     "fastapi>=0.115",         # HTTP API over the research engine
     "uvicorn[standard]>=0.32", # ASGI server for the API
+    "websockets>=13.0",       # WebSocket transport for progress streaming
 ]
 
 [project.optional-dependencies]
