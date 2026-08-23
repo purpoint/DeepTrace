@@ -92,11 +92,11 @@ Built sequentially. This table reflects what actually works, not what is planned
 | B | Query analyzer, research planner | ✅ |
 | C | Tools, researcher agent, evidence system | ✅ |
 | D | PostgreSQL persistence | ✅ |
-| E | LangGraph workflow, parallel research | 🟡 In progress — workflow and resumable runs complete |
-| F | Analyst, claims, fact checker | ⬜ |
-| G | Report generation, citations | ⬜ |
-| H | Redis workers, FastAPI, WebSockets | ⬜ |
-| I | React workspace, authentication | ⬜ |
+| E | LangGraph workflow, parallel research | ✅ |
+| F | Analyst, claims, fact checker | ✅ |
+| G | Report generation, citations | ✅ |
+| H | Redis workers, FastAPI, WebSockets | ✅ |
+| I | React workspace, authentication | ✅ |
 | J | Evaluation, observability, optimization | ⬜ |
 | K | Docker, CI/CD, deployment, docs | ⬜ |
 
@@ -130,6 +130,14 @@ Add your API keys to `.env`, then verify:
 make check
 ```
 
+`.env` also needs a `JWT_SECRET`. The API refuses to start with one shorter than
+32 characters: HS256 keys are brute-forceable offline, where there is no server
+in the loop to rate limit the attempt.
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
 `deeptrace status` prints the resolved configuration and depth budgets;
 `deeptrace check` reports foundation health and what is still pending.
 
@@ -148,6 +156,30 @@ rather than paid for again:
 deeptrace resume res_f460fa9e6f5740f0
 ```
 
+### The service
+
+Three processes: the API, at least one worker, and the browser client.
+
+```bash
+make db-up      # apply migrations
+make api        # http://127.0.0.1:8000  (docs at /docs)
+make worker     # consumes research jobs
+make web        # http://localhost:5173
+```
+
+Every research endpoint requires an account, and answers only for the research
+belonging to it — a run someone else owns is reported as though it does not
+exist. Register through the sign-in screen, or create the first account from the
+shell:
+
+```bash
+deeptrace users create you@example.com
+```
+
+A run started with `deeptrace research` has no owner and is therefore not
+visible through the API. Use `deeptrace submit --as you@example.com` to queue one
+that belongs to an account.
+
 ---
 
 ## Repository layout
@@ -155,7 +187,7 @@ deeptrace resume res_f460fa9e6f5740f0
 ```text
 apps/            FastAPI service, background worker, React frontend
 core/            Agents, workflow graph, tools, prompts, evaluation
-infrastructure/  Database, cache, and queue adapters
+infrastructure/  Database, auth, cache, and queue adapters
 tests/           Unit, integration, workflow, and evaluation tests
 scripts/         Development and operational scripts
 ```
