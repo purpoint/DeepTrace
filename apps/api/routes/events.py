@@ -25,6 +25,19 @@ between the read and the subscribe reach neither path, and the client never
 learns they existed. Sending the buffer without de-duplicating would deliver
 some events twice, which for a progress stream means a claim count that goes up
 and then up again.
+
+**Authenticating it is its own problem.** A browser opening a WebSocket cannot
+set an ``Authorization`` header -- the API has no parameter for one -- so the
+credential must travel in the URL, where access logs and browser history will
+keep it. The answer here is a ticket: minted by an authenticated HTTP call,
+valid for thirty seconds, destroyed by the first use. What ends up in a log file
+is a string that expired before anyone read it.
+
+Redeeming the ticket says who is connecting. It does not say whether they may
+watch *this* run, so the run is loaded through the same scoped repository the
+REST endpoints use, and a stream for someone else's research is refused. A
+progress stream leaks more than it looks like: the question text, the sources
+being read, and the claims as they are made.
 """
 
 from __future__ import annotations
@@ -36,6 +49,8 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from core.logging import get_logger
 from core.observability.progress import EventKind, ProgressEvent
+from infrastructure.db.repositories.research import ResearchRepository
+from infrastructure.db.repositories.scope import Viewer
 
 log = get_logger(__name__)
 
@@ -55,6 +70,7 @@ nothing while consuming a connection.
 async def events(
     websocket: WebSocket,
     research_id: str,
+    ticket: str = Query(min_length=8, max_length=256),
     after: int = Query(default=0, ge=0),
 ) -> None:
     """Stream a run's progress, starting after a given event.
@@ -63,6 +79,11 @@ async def events(
     wants. A reconnecting client sends the last sequence number it saw, and
     receives exactly what followed -- which is the difference between a
     reconnect costing nothing and a reconnect losing the result.
+
+    A reconnect therefore needs a fresh ticket, because the previous one was
+    consumed. That is the client's job and it is a cheap call, and the
+    alternative -- a ticket good for several connections -- is a credential in a
+    URL with a reason to keep it alive.
     """
     stream = getattr(websocket.app.state, "events", None)
     if stream is None:
@@ -74,6 +95,20 @@ async def events(
         return
 
     await websocket.accept()
+
+    viewer = await _redeem(websocket, ticket)
+    if viewer is None:
+        await websocket.close(code=1008, reason="Not signed in.")
+        return
+
+    if not await _may_watch(websocket, research_id, viewer):
+        # The same answer a stranger gets from every REST endpoint: as though
+        # the run does not exist. A distinct "not yours" close code would
+        # confirm the id to anyone guessing.
+        log.info("events.refused", research_id=research_id, user_id=viewer.user_id)
+        await websocket.close(code=1008, reason="No such research.")
+        return
+
     delivered = after
 
     try:
@@ -130,6 +165,45 @@ async def events(
         )
         with contextlib.suppress(RuntimeError):
             await websocket.close(code=1011, reason="The stream failed.")
+
+
+async def _redeem(websocket: WebSocket, ticket: str) -> Viewer | None:
+    """Trade a ticket for the viewer it was issued to, exactly once."""
+    sessions = getattr(websocket.app.state, "sessions", None)
+    if sessions is None:
+        return None
+
+    user_id = await sessions.redeem_ticket(ticket)
+    return Viewer.user(user_id) if user_id else None
+
+
+async def _may_watch(websocket: WebSocket, research_id: str, viewer: Viewer) -> bool:
+    """Whether this viewer owns the run -- asked of the queue first, then the archive.
+
+    The order is not an optimisation, it is the only order that works. A run's
+    database row is written by the worker when the run *finishes*, so for the
+    entire time a progress stream is interesting there is no row to check
+    ownership against. The job in Redis exists from the moment the question was
+    submitted and carries the id of whoever submitted it, which makes it the
+    only record of ownership that exists while a run is in flight.
+
+    The archive is the fallback, for a finished run whose job has aged out of
+    Redis and is being read back. Between them the two cover a run's whole life,
+    and neither covers it alone.
+    """
+    queue = getattr(websocket.app.state, "queue", None)
+    if queue is not None:
+        job = await queue.get_by_research(research_id)
+        if job is not None:
+            return job.user_id is not None and job.user_id == viewer.user_id
+
+    factory = getattr(websocket.app.state, "session_factory", None)
+    if factory is None:
+        return False
+
+    async with factory() as session:
+        repository = ResearchRepository(session, viewer)
+        return await repository.get_session(research_id) is not None
 
 
 async def _drain(subscription: object) -> list[ProgressEvent]:

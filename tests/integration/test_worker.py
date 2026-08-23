@@ -77,7 +77,7 @@ class StubWorker(Worker):
         self.research_calls += 1
         return self._run
 
-    async def _persist(self, run: ResearchRun) -> None:
+    async def _persist(self, run: ResearchRun, *, owner_id: str | None = None) -> None:
         self.persisted.append(run)
 
 
@@ -197,7 +197,7 @@ class TestResumption:
         monkeypatch.setattr(runner, "run_research", fake_run)
 
         worker = Worker(queue, settings=settings(), checkpointer=object())
-        monkeypatch.setattr(worker, "_persist", lambda _run: asyncio.sleep(0))
+        monkeypatch.setattr(worker, "_persist", lambda _run, **_: asyncio.sleep(0))
 
         outcome = await worker.execute(taken)
 
@@ -227,7 +227,7 @@ class TestResumption:
         monkeypatch.setattr(runner, "run_research", fake_run)
 
         worker = Worker(queue, settings=settings(), checkpointer=object())
-        monkeypatch.setattr(worker, "_persist", lambda _run: asyncio.sleep(0))
+        monkeypatch.setattr(worker, "_persist", lambda _run, **_: asyncio.sleep(0))
 
         await worker.execute(taken)
 
@@ -243,10 +243,10 @@ class TestPersistenceIsNotTheJob:
         assert taken is not None
 
         class BrokenArchive(StubWorker):
-            async def _persist(self, run: ResearchRun) -> None:
+            async def _persist(self, run: ResearchRun, *, owner_id: str | None = None) -> None:
                 # The real _persist swallows and logs; this asserts the worker
                 # calls it inside that contract rather than around it.
-                await Worker._persist(self, run)
+                await Worker._persist(self, run, owner_id=owner_id)
 
         worker = BrokenArchive(
             queue,

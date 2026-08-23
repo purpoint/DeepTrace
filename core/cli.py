@@ -123,6 +123,7 @@ async def _persist(run: ResearchRun) -> str | None:
         from infrastructure.db.engine import session_scope
         from infrastructure.db.recorder import PostgresRunRecorder
         from infrastructure.db.repositories.research import ResearchRepository
+        from infrastructure.db.repositories.scope import Viewer
 
         async with session_scope() as session:
             recorder = PostgresRunRecorder(session, research_id=run.research_id)
@@ -131,7 +132,12 @@ async def _persist(run: ResearchRun) -> str | None:
             for call in run.usage.tool_calls:
                 recorder.record_tool_call(call)
 
-            await ResearchRepository(session).save_run(run)
+            # No account. A run made from the command line belongs to the
+            # machine, not to a user of the service, and it is therefore
+            # invisible through the API -- which is the honest outcome rather
+            # than an oversight. `deeptrace submit` is the way to make a run a
+            # person owns.
+            await ResearchRepository(session, Viewer.system()).save_run(run)
             await recorder.flush()
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
@@ -441,22 +447,123 @@ async def _queue() -> AsyncIterator[RedisJobQueue]:
         await queue.close()
 
 
+def _users(args: argparse.Namespace) -> int:
+    """Create and list accounts, for an operator with a shell but no browser.
+
+    The API's registration endpoint is open, so this is not the only way to make
+    an account -- but it is the one that works before anything is deployed, and
+    the one that does not consume a rate limit meant for strangers.
+    """
+    import getpass
+
+    from infrastructure.db.engine import session_scope
+    from infrastructure.db.repositories.users import (
+        EmailAlreadyRegistered,
+        UserRepository,
+    )
+
+    async def create(email: str, password: str, name: str | None) -> str:
+        from infrastructure.auth.passwords import check_policy, hash_password
+
+        settings = get_settings()
+        check_policy(
+            password,
+            minimum=settings.password_min_length,
+            maximum=settings.password_max_length,
+        )
+        password_hash = await hash_password(password)
+        async with session_scope() as session:
+            user = await UserRepository(session).create(
+                email, password_hash=password_hash, display_name=name
+            )
+            return user.id
+
+    async def listing() -> list[tuple[str, str, bool]]:
+        from sqlalchemy import select
+
+        from infrastructure.db.models import User
+
+        async with session_scope() as session:
+            rows = (await session.execute(select(User).order_by(User.created_at))).scalars().all()
+            return [(row.id, row.email, row.is_active) for row in rows]
+
+    if args.users_command == "list":
+        try:
+            accounts = asyncio.run(listing())
+        except Exception as exc:
+            print(f"could not reach the database: {type(exc).__name__}: {exc}")
+            return 1
+        if not accounts:
+            print("no accounts yet.  create one:  deeptrace users create you@example.com")
+            return 0
+        for user_id, email, active in accounts:
+            print(f"{user_id}  {email}{'' if active else '  (disabled)'}")
+        return 0
+
+    # Prompted rather than accepted as an argument. A password on the command
+    # line is written to the shell history file and is visible in `ps` to every
+    # other user on the machine, for as long as the command runs.
+    password = getpass.getpass("password: ")
+    if password != getpass.getpass("confirm:  "):
+        print("those did not match.")
+        return 1
+
+    try:
+        user_id = asyncio.run(create(args.email, password, args.name))
+    except EmailAlreadyRegistered:
+        print(f"an account already exists for {args.email}")
+        return 1
+    except ValueError as exc:  # the password policy
+        print(str(exc))
+        return 1
+    except Exception as exc:
+        print(f"could not reach the database: {type(exc).__name__}: {exc}")
+        return 1
+
+    print(f"created {user_id}  {args.email}")
+    return 0
+
+
 def _submit(args: argparse.Namespace) -> int:
     """Queue a job and return. The work happens in a worker."""
     from infrastructure.queue.job import Job
 
+    async def owner_id() -> str | None:
+        """Resolve --as to a user id, so the run has somewhere to belong.
+
+        Without it the job has no owner, the run it produces has no owner, and
+        it is invisible through the API -- which is correct, and surprising the
+        first time it happens from a shell.
+        """
+        if not args.as_user:
+            return None
+
+        from infrastructure.db.engine import session_scope
+        from infrastructure.db.repositories.users import UserRepository
+
+        async with session_scope() as session:
+            user = await UserRepository(session).by_email(args.as_user)
+            if user is None:
+                raise LookupError(args.as_user)
+            return user.id
+
     async def execute() -> Job:
+        user_id = await owner_id()
         async with _queue() as queue:
             return await queue.enqueue(
                 Job(
                     question=args.question,
                     depth=ResearchDepth(args.depth),
                     max_tasks=args.max_tasks,
+                    user_id=user_id,
                 )
             )
 
     try:
         job = asyncio.run(execute())
+    except LookupError as exc:
+        print(f"no account for {exc}.  create one:  deeptrace users create {exc}")
+        return 1
     except Exception as exc:
         print(f"could not reach the queue: {type(exc).__name__}: {exc}")
         return 1
@@ -632,6 +739,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=ResearchDepth.STANDARD.value,
     )
     submit.add_argument("--max-tasks", type=int, default=None, metavar="N")
+    submit.add_argument(
+        "--as",
+        dest="as_user",
+        metavar="EMAIL",
+        default=None,
+        help="Attribute the run to this account, so it is visible through the API",
+    )
+
+    users = subcommands.add_parser("users", help="Create and list accounts")
+    user_commands = users.add_subparsers(dest="users_command")
+    create_user = user_commands.add_parser("create", help="Create an account")
+    create_user.add_argument("email")
+    create_user.add_argument("--name", default=None, help="Display name")
+    user_commands.add_parser("list", help="List accounts")
 
     work = subcommands.add_parser("work", help="Run a worker that consumes research jobs")
     work.add_argument(
@@ -673,6 +794,10 @@ def main(argv: list[str] | None = None) -> int:
         return _resume_research(args)
     if args.command == "submit":
         return _submit(args)
+    if args.command == "users":
+        if not args.users_command:
+            parser.parse_args(["users", "--help"])
+        return _users(args)
     if args.command == "work":
         return _work(args)
     if args.command == "jobs":

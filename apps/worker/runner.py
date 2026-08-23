@@ -178,7 +178,7 @@ class Worker:
             log.warning("worker.research_failed", job_id=job.id, outcome=outcome.value)
             return outcome
 
-        await self._persist(run)
+        await self._persist(run, owner_id=job.user_id)
         await self.queue.complete(job)
         await self._announce(
             job,
@@ -289,8 +289,16 @@ class Worker:
             await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
             await self.queue.heartbeat(job.id)
 
-    async def _persist(self, run: ResearchRun) -> None:
-        """Save the run, and never let saving it fail the job.
+    async def _persist(self, run: ResearchRun, *, owner_id: str | None) -> None:
+        """Save the run under the account that queued it.
+
+        The owner comes from the job rather than from the research, because the
+        research engine has no concept of one -- it takes a question and
+        produces a run. The job is the only record that remembers who asked, and
+        carrying the id through to here is what turns a finished run into
+        something its owner can find and nobody else can.
+
+        Never let saving it fail the job.
 
         The research is done and its results are in memory. Losing them because
         the database was briefly unreachable would be worse than a job recorded
@@ -301,6 +309,7 @@ class Worker:
             from infrastructure.db.engine import session_scope
             from infrastructure.db.recorder import PostgresRunRecorder
             from infrastructure.db.repositories.research import ResearchRepository
+            from infrastructure.db.repositories.scope import Viewer
 
             async with session_scope(self.settings) as session:
                 recorder = PostgresRunRecorder(session, research_id=run.research_id)
@@ -309,7 +318,11 @@ class Worker:
                 for call in run.usage.tool_calls:
                     recorder.record_tool_call(call)
 
-                await ResearchRepository(session).save_run(run)
+                # A system viewer: the worker is not acting as a person, and
+                # is the only kind of caller allowed to name an owner other
+                # than itself.
+                repository = ResearchRepository(session, Viewer.system())
+                await repository.save_run(run, user_id=owner_id)
                 await recorder.flush()
         except Exception as exc:
             log.error(

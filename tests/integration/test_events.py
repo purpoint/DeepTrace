@@ -9,6 +9,11 @@ away.
 Against a real Redis because the guarantee rests on pub/sub delivering only to
 current subscribers, which is precisely the behaviour a fake would be written
 to paper over.
+
+The socket tests sign in and open their stream with a ticket, because that is
+the only way in. The ticket flow is worth exercising rather than stubbing: it is
+the one credential path in the system that does not go through the
+``Authorization`` header, and a browser has no way to use any other.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from uuid import uuid4
 
 import pytest
 from redis.asyncio import Redis
@@ -24,10 +30,14 @@ from apps.api.main import create_app
 from core.config import Settings
 from core.observability.progress import EventKind, ProgressEvent
 from infrastructure.queue.events import RedisProgressStream
+from infrastructure.queue.job import Job
+from infrastructure.queue.redis_queue import RedisJobQueue
 
 pytestmark = [pytest.mark.integration]
 
 TEST_REDIS_URL = os.getenv("TEST_REDIS_URL", "redis://localhost:6379/15")
+
+TEST_JWT_SECRET = "a-test-signing-key-long-enough-to-pass-validation"
 
 
 @pytest.fixture
@@ -141,8 +151,53 @@ class TestTheWebSocket:
                 _env_file=None,  # type: ignore[call-arg]
                 database_url=migrated_database,
                 redis_url=redis_url,
+                jwt_secret=TEST_JWT_SECRET,
             )
         )
+
+    @staticmethod
+    def _sign_in(http: object, research_id: str) -> str:
+        """Register an account, claim the run, and return a ticket for it.
+
+        Claiming happens by writing a job that carries the research id and the
+        new account's id -- which is exactly what ``POST /research`` does, and
+        the only record of ownership that exists while a run is still in
+        flight. Seeding it here rather than submitting a real question keeps the
+        research id under the test's control.
+        """
+        registration = http.post(  # type: ignore[attr-defined]
+            "/auth/register",
+            json={
+                "email": f"watcher-{uuid4().hex[:12]}@example.com",
+                "password": "a-long-enough-password",
+            },
+        )
+        assert registration.status_code == 201, registration.text
+        headers = {"Authorization": f"Bearer {registration.json()['access_token']}"}
+
+        user_id = http.get("/auth/me", headers=headers).json()["id"]  # type: ignore[attr-defined]
+        TestTheWebSocket._claim(research_id, user_id)
+
+        ticket = http.post("/auth/ws-ticket", headers=headers)  # type: ignore[attr-defined]
+        assert ticket.status_code == 200, ticket.text
+        return str(ticket.json()["ticket"])
+
+    @staticmethod
+    def _claim(research_id: str, user_id: str) -> None:
+        """Put a job for this run in the queue, owned by this account."""
+
+        async def run() -> None:
+            client: Redis = Redis.from_url(TEST_REDIS_URL, decode_responses=True)
+            await RedisJobQueue(client).enqueue(
+                Job(
+                    research_id=research_id,
+                    question="How does Kafka guarantee ordering?",
+                    user_id=user_id,
+                )
+            )
+            await client.aclose()
+
+        asyncio.run(run())
 
     @staticmethod
     def _seed(events: list[ProgressEvent]) -> None:
@@ -169,11 +224,10 @@ class TestTheWebSocket:
             ]
         )
 
-        with (
-            TestClient(self._app(migrated_database)) as http,  # type: ignore[arg-type]
-            http.websocket_connect("/research/res_ws/events") as socket,
-        ):
-            received = [socket.receive_json() for _ in range(3)]
+        with TestClient(self._app(migrated_database)) as http:  # type: ignore[arg-type]
+            ticket = self._sign_in(http, "res_ws")
+            with http.websocket_connect(f"/research/res_ws/events?ticket={ticket}") as socket:
+                received = [socket.receive_json() for _ in range(3)]
 
         assert [event["sequence"] for event in received] == [1, 2, 3]
         assert received[-1]["kind"] == "completed"
@@ -195,12 +249,13 @@ class TestTheWebSocket:
             ]
         )
 
-        with (
-            TestClient(self._app(migrated_database)) as http,  # type: ignore[arg-type]
-            http.websocket_connect("/research/res_gap/events?after=3") as socket,
-        ):
-            fourth = socket.receive_json()
-            fifth = socket.receive_json()
+        with TestClient(self._app(migrated_database)) as http:  # type: ignore[arg-type]
+            ticket = self._sign_in(http, "res_gap")
+            with http.websocket_connect(
+                f"/research/res_gap/events?ticket={ticket}&after=3"
+            ) as socket:
+                fourth = socket.receive_json()
+                fifth = socket.receive_json()
 
         assert fourth["sequence"] == 4
         assert fifth["sequence"] == 5
@@ -229,13 +284,12 @@ class TestTheWebSocket:
 
             asyncio.run(run())
 
-        with (
-            TestClient(self._app(migrated_database)) as http,  # type: ignore[arg-type]
-            http.websocket_connect("/research/res_live/events") as socket,
-        ):
-            assert socket.receive_json()["kind"] == "started"
-            publish_terminal()
-            assert socket.receive_json()["kind"] == "completed"
+        with TestClient(self._app(migrated_database)) as http:  # type: ignore[arg-type]
+            ticket = self._sign_in(http, "res_live")
+            with http.websocket_connect(f"/research/res_live/events?ticket={ticket}") as socket:
+                assert socket.receive_json()["kind"] == "started"
+                publish_terminal()
+                assert socket.receive_json()["kind"] == "completed"
 
     def test_the_socket_closes_when_the_run_ends(self, migrated_database: str) -> None:
         """A client holding a socket open after the run finished holds a
@@ -251,13 +305,12 @@ class TestTheWebSocket:
             ]
         )
 
-        with (
-            TestClient(self._app(migrated_database)) as http,  # type: ignore[arg-type]
-            http.websocket_connect("/research/res_end/events") as socket,
-        ):
-            assert socket.receive_json()["kind"] == "failed"
-            with pytest.raises(WebSocketDisconnect):
-                socket.receive_json()
+        with TestClient(self._app(migrated_database)) as http:  # type: ignore[arg-type]
+            ticket = self._sign_in(http, "res_end")
+            with http.websocket_connect(f"/research/res_end/events?ticket={ticket}") as socket:
+                assert socket.receive_json()["kind"] == "failed"
+                with pytest.raises(WebSocketDisconnect):
+                    socket.receive_json()
 
     def test_streaming_being_unavailable_is_reported_not_hidden(
         self, migrated_database: str
@@ -275,8 +328,83 @@ class TestTheWebSocket:
         with (
             TestClient(app) as http,  # type: ignore[arg-type]
             pytest.raises(WebSocketDisconnect) as closed,
-            http.websocket_connect("/research/res_x/events") as socket,
+            http.websocket_connect("/research/res_x/events?ticket=irrelevant") as socket,
         ):
             socket.receive_json()
 
         assert closed.value.code == 1013
+
+    def test_a_stream_cannot_be_opened_without_a_ticket(self, migrated_database: str) -> None:
+        """The credential is required, and its absence is a 403 on the upgrade
+        rather than a socket that opens and streams somebody else's run."""
+        from starlette.testclient import TestClient
+        from starlette.websockets import WebSocketDisconnect
+
+        self._seed([an_event("res_noauth", EventKind.STARTED)])
+
+        with (
+            TestClient(self._app(migrated_database)) as http,  # type: ignore[arg-type]
+            pytest.raises(WebSocketDisconnect) as closed,
+            http.websocket_connect("/research/res_noauth/events") as socket,
+        ):
+            socket.receive_json()
+
+        assert closed.value.code == 1008
+
+    def test_a_ticket_works_once(self, migrated_database: str) -> None:
+        """Redeeming destroys it. A ticket that could be replayed would be a
+        credential in a URL with no expiry that matters."""
+        from starlette.testclient import TestClient
+        from starlette.websockets import WebSocketDisconnect
+
+        self._seed(
+            [
+                ProgressEvent(
+                    research_id="res_once", kind=EventKind.COMPLETED, message="Research complete."
+                )
+            ]
+        )
+
+        with TestClient(self._app(migrated_database)) as http:  # type: ignore[arg-type]
+            ticket = self._sign_in(http, "res_once")
+
+            with http.websocket_connect(f"/research/res_once/events?ticket={ticket}") as socket:
+                assert socket.receive_json()["kind"] == "completed"
+
+            with (
+                pytest.raises(WebSocketDisconnect) as closed,
+                http.websocket_connect(f"/research/res_once/events?ticket={ticket}") as socket,
+            ):
+                socket.receive_json()
+
+        assert closed.value.code == 1008
+
+    def test_one_account_cannot_watch_another_s_run(self, migrated_database: str) -> None:
+        """The ownership check on the stream. A progress stream carries the
+        question, the sources as they are read, and the claims as they are made
+        -- refusing it matters as much as refusing the report."""
+        from starlette.testclient import TestClient
+        from starlette.websockets import WebSocketDisconnect
+
+        self._seed([an_event("res_theirs", EventKind.STARTED)])
+
+        with TestClient(self._app(migrated_database)) as http:  # type: ignore[arg-type]
+            # One account owns the run; a second account asks to watch it.
+            self._sign_in(http, "res_theirs")
+            intruder = http.post(
+                "/auth/register",
+                json={
+                    "email": f"intruder-{uuid4().hex[:12]}@example.com",
+                    "password": "a-long-enough-password",
+                },
+            )
+            headers = {"Authorization": f"Bearer {intruder.json()['access_token']}"}
+            ticket = http.post("/auth/ws-ticket", headers=headers).json()["ticket"]
+
+            with (
+                pytest.raises(WebSocketDisconnect) as closed,
+                http.websocket_connect(f"/research/res_theirs/events?ticket={ticket}") as socket,
+            ):
+                socket.receive_json()
+
+        assert closed.value.code == 1008

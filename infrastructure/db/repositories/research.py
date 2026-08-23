@@ -9,6 +9,15 @@ Writes are ordered by dependency: the session, then sources, then evidence.
 Evidence has a real foreign key to its source, so writing it first would be
 rejected -- correctly, because evidence that cannot reach a source is exactly
 what the schema refuses to hold.
+
+Every read is scoped to a :class:`Viewer`, supplied when the repository is
+built. That is where "user A cannot read user B's research" is actually
+enforced: not in a route that remembers to compare two ids, but in the ``WHERE``
+clause of each query, so a route that forgets returns nothing rather than
+everything. The child tables -- sources, evidence, claims, the trace -- are
+filtered by a subquery against their run's owner even though the route already
+checked the run, because the whole point of moving the check down here is that
+it stops depending on the route having done it.
 """
 
 from __future__ import annotations
@@ -16,9 +25,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import ColumnElement, delete, func, select, true
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 from core.logging import get_logger
 from core.models.evidence import Evidence
@@ -36,15 +46,52 @@ from infrastructure.db.models import (
     SourceRow,
     ToolCallRow,
 )
+from infrastructure.db.repositories.scope import Viewer
 
 log = get_logger(__name__)
 
 
 class ResearchRepository:
-    """Persists and loads research runs."""
+    """Persists and loads research runs, on behalf of one viewer."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, viewer: Viewer) -> None:
         self.session = session
+        self.viewer = viewer
+
+    # -- ownership ---------------------------------------------------------
+
+    def _visible(self) -> list[ColumnElement[bool]]:
+        """The ownership predicate for a query over research_sessions.
+
+        A list rather than a single clause so that the system viewer
+        contributes nothing at all, instead of contributing ``TRUE`` -- which
+        would read, in every query, as though a filter were being applied.
+        """
+        if self.viewer.is_system:
+            return []
+        return [ResearchSession.user_id == self.viewer.user_id]
+
+    def _belongs_to_viewer(
+        self, research_id_column: InstrumentedAttribute[Any]
+    ) -> ColumnElement[bool]:
+        """True when a child row's run is one this viewer may see.
+
+        An EXISTS against the parent, correlated on the run id. It costs one
+        indexed lookup, and it is what makes ``get_evidence`` safe to call with
+        an arbitrary id from a URL: the answer to "give me the evidence for
+        someone else's run" is an empty list, decided by PostgreSQL rather than
+        by whoever wrote the endpoint.
+        """
+        if self.viewer.is_system:
+            return true()
+        return (
+            select(ResearchSession.id)
+            .where(
+                ResearchSession.id == research_id_column,
+                ResearchSession.user_id == self.viewer.user_id,
+            )
+            .exists()
+        )
 
     # -- writing -----------------------------------------------------------
 
@@ -54,8 +101,16 @@ class ResearchRepository:
         A failed run is saved too. It is the record of what was attempted, and
         discarding it would leave a user's history with an unexplained gap where
         a research request used to be.
+
+        ``user_id`` is who the run belongs to. A system viewer -- the worker,
+        saving on behalf of whoever queued the job -- passes it explicitly; any
+        other viewer can only write runs it owns, so its own id is used and the
+        argument is ignored. Letting a request-scoped repository choose an
+        arbitrary owner would be a way to write rows into someone else's
+        history.
         """
-        await self._upsert_session(run, user_id=user_id)
+        owner = user_id if self.viewer.is_system else self.viewer.user_id
+        await self._upsert_session(run, user_id=owner)
         await self._save_tasks(run)
         sources = await self._save_sources(run)
         kept = await self._save_evidence(run, known_sources=sources)
@@ -99,15 +154,20 @@ class ResearchRepository:
             "completed_at": now,
         }
         statement = insert(ResearchSession).values(values)
+        updates: dict[str, Any] = {
+            key: statement.excluded[key] for key in values if key not in ("id", "created_at")
+        }
+        # A run is written once while in progress and again when it finishes,
+        # and the second write may come from a context that does not know who
+        # owns it. Taking the incoming value unconditionally would let that
+        # second write set user_id back to NULL, which does not fail, does not
+        # log, and makes the run disappear from the history of the person who
+        # asked for it. COALESCE keeps an owner once one is known.
+        updates["user_id"] = func.coalesce(
+            statement.excluded.user_id, ResearchSession.__table__.c.user_id
+        )
         await self.session.execute(
-            statement.on_conflict_do_update(
-                index_elements=["id"],
-                set_={
-                    key: statement.excluded[key]
-                    for key in values
-                    if key not in ("id", "created_at")
-                },
-            )
+            statement.on_conflict_do_update(index_elements=["id"], set_=updates)
         )
 
     async def _save_tasks(self, run: ResearchRun) -> None:
@@ -327,24 +387,40 @@ class ResearchRepository:
     # -- reading -----------------------------------------------------------
 
     async def get_session(self, research_id: str) -> ResearchSession | None:
+        """One run, if this viewer may see it.
+
+        A run owned by someone else returns ``None``, indistinguishable from a
+        run that does not exist -- which is what the caller should turn into a
+        404. A 403 would confirm the id is real, and an id a stranger can
+        confirm is an id a stranger can enumerate.
+        """
         result = await self.session.execute(
-            select(ResearchSession).where(ResearchSession.id == research_id)
+            select(ResearchSession).where(ResearchSession.id == research_id, *self._visible())
         )
         return result.scalar_one_or_none()
 
-    async def list_sessions(
-        self, *, user_id: str | None = None, limit: int = 20
-    ) -> list[ResearchSession]:
-        """Research history, newest first."""
-        query = select(ResearchSession).order_by(ResearchSession.created_at.desc()).limit(limit)
-        if user_id is not None:
-            query = query.where(ResearchSession.user_id == user_id)
+    async def list_sessions(self, *, limit: int = 20) -> list[ResearchSession]:
+        """This viewer's research history, newest first.
+
+        The user filter used to be an optional argument, which meant the default
+        behaviour of this method was to list everyone's. It now comes from the
+        viewer, so there is no call that accidentally omits it.
+        """
+        query = (
+            select(ResearchSession)
+            .where(*self._visible())
+            .order_by(ResearchSession.created_at.desc())
+            .limit(limit)
+        )
         return list((await self.session.execute(query)).scalars().all())
 
     async def get_sources(self, research_id: str) -> list[SourceRow]:
         result = await self.session.execute(
             select(SourceRow)
-            .where(SourceRow.research_id == research_id)
+            .where(
+                SourceRow.research_id == research_id,
+                self._belongs_to_viewer(SourceRow.research_id),
+            )
             .order_by(SourceRow.quality_score.desc())
         )
         return list(result.scalars().all())
@@ -353,7 +429,10 @@ class ResearchRepository:
         """Evidence for a run, strongest first."""
         result = await self.session.execute(
             select(EvidenceRow)
-            .where(EvidenceRow.research_id == research_id)
+            .where(
+                EvidenceRow.research_id == research_id,
+                self._belongs_to_viewer(EvidenceRow.research_id),
+            )
             .order_by(EvidenceRow.weight.desc())
         )
         return list(result.scalars().all())
@@ -366,7 +445,10 @@ class ResearchRepository:
         """
         query = (
             select(ClaimRow)
-            .where(ClaimRow.research_id == research_id)
+            .where(
+                ClaimRow.research_id == research_id,
+                self._belongs_to_viewer(ClaimRow.research_id),
+            )
             .order_by(ClaimRow.strength.desc())
         )
         if status is not None:
@@ -383,7 +465,10 @@ class ResearchRepository:
         result = await self.session.execute(
             select(ClaimRow)
             .join(ClaimEvidenceRow, ClaimEvidenceRow.claim_id == ClaimRow.id)
-            .where(ClaimEvidenceRow.evidence_id == evidence_id)
+            .where(
+                ClaimEvidenceRow.evidence_id == evidence_id,
+                self._belongs_to_viewer(ClaimRow.research_id),
+            )
             .order_by(ClaimRow.strength.desc())
         )
         return list(result.scalars().all())
@@ -398,7 +483,10 @@ class ResearchRepository:
         runs = (
             (
                 await self.session.execute(
-                    select(AgentRunRow).where(AgentRunRow.research_id == research_id)
+                    select(AgentRunRow).where(
+                        AgentRunRow.research_id == research_id,
+                        self._belongs_to_viewer(AgentRunRow.research_id),
+                    )
                 )
             )
             .scalars()
@@ -407,7 +495,10 @@ class ResearchRepository:
         calls = (
             (
                 await self.session.execute(
-                    select(ToolCallRow).where(ToolCallRow.research_id == research_id)
+                    select(ToolCallRow).where(
+                        ToolCallRow.research_id == research_id,
+                        self._belongs_to_viewer(ToolCallRow.research_id),
+                    )
                 )
             )
             .scalars()
@@ -428,7 +519,10 @@ class ResearchRepository:
             select(
                 func.sum(AgentRunRow.cost_usd),
                 func.count(AgentRunRow.run_id).filter(AgentRunRow.cost_usd.is_(None)),
-            ).where(AgentRunRow.research_id == research_id)
+            ).where(
+                AgentRunRow.research_id == research_id,
+                self._belongs_to_viewer(AgentRunRow.research_id),
+            )
         )
         total, unpriced = result.one()
         if unpriced or total is None:
@@ -436,5 +530,11 @@ class ResearchRepository:
         return float(total)
 
     async def delete_session(self, research_id: str) -> None:
-        """Delete a run and everything it produced, via cascade."""
-        await self.session.execute(delete(ResearchSession).where(ResearchSession.id == research_id))
+        """Delete a run and everything it produced, via cascade.
+
+        Scoped like every read. A delete that is not scoped is worse than a read
+        that is not scoped: the damage is someone else's and it is permanent.
+        """
+        await self.session.execute(
+            delete(ResearchSession).where(ResearchSession.id == research_id, *self._visible())
+        )

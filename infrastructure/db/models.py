@@ -63,11 +63,45 @@ class Base(DeclarativeBase):
 
 
 class User(Base):
+    """An account, and the owner of everything it researches.
+
+    The table existed from the first migration with nothing in it but an email,
+    because ``research_sessions.user_id`` needed something to point at. What
+    arrives here now is the part that makes the pointer mean something: a
+    credential to prove you are the row, and a switch to stop you being it.
+    """
+
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    """Stored already lowercased and stripped.
+
+    Normalising on write rather than on read is what makes the unique index a
+    real constraint: ``Ada@example.com`` and ``ada@example.com`` are the same
+    account to every mail server on earth, and a case-sensitive index would
+    happily hold both and let one person register twice."""
+
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    """Argon2id, parameters encoded in the string itself.
+
+    Nullable because not every account has a password: an account created by
+    the CLI so a local run has an owner never logs in, and a future identity
+    provider would not bring one either. A NULL here means "cannot sign in with
+    a password", which the login path treats as a failed verification rather
+    than as a missing check."""
+
+    display_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    """Whether this account may authenticate.
+
+    A flag rather than a delete. Deleting a user cascades to every run they
+    ever made, so "stop this person signing in" and "destroy their research"
+    have to be separate actions -- otherwise the mild response to a suspected
+    compromise is the destructive one."""
+
     created_at: Mapped[datetime] = mapped_column(default=_now)
+    last_login_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     sessions: Mapped[list[ResearchSession]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

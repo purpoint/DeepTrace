@@ -24,7 +24,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 from core.config import ResearchDepth
 
@@ -233,3 +233,85 @@ class HealthResponse(BaseModel):
 
 
 ResearchDetail.model_rebuild()
+
+
+# ---------------------------------------------------------------------------
+# Accounts and sessions
+#
+# The request models here are the only ones in this file that carry a secret.
+# They are also the only ones with no matching response model that echoes them
+# back, which is deliberate: a password has exactly one legitimate direction of
+# travel, and a response model that could hold one is a response model that
+# eventually does.
+# ---------------------------------------------------------------------------
+
+
+class RegisterRequest(BaseModel):
+    """A new account."""
+
+    model_config = {"extra": "forbid"}
+
+    email: EmailStr = Field(description="Validated for shape, not for existence.")
+    password: str = Field(
+        min_length=1,
+        max_length=4096,
+        description=(
+            "Checked against the configured policy after validation. The bounds "
+            "here are only wide enough to keep an unbounded body from reaching "
+            "the hasher -- the real minimum is applied where the policy lives."
+        ),
+    )
+    display_name: str | None = Field(default=None, max_length=120)
+
+
+class LoginRequest(BaseModel):
+    """Credentials for an existing account."""
+
+    model_config = {"extra": "forbid"}
+
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=4096)
+
+
+class RefreshRequest(BaseModel):
+    """A refresh token, exchanged for a new pair."""
+
+    model_config = {"extra": "forbid"}
+
+    refresh_token: str = Field(min_length=1, max_length=4096)
+
+
+class TokenPair(BaseModel):
+    """What a successful sign-in returns.
+
+    ``expires_in`` is seconds rather than an absolute time. An absolute expiry
+    requires the client's clock to agree with the server's, and a browser whose
+    clock is ten minutes fast would refresh constantly or not at all.
+    """
+
+    access_token: str
+    refresh_token: str
+    token_type: str = "Bearer"  # noqa: S105 -- the scheme name, per RFC 6750
+    expires_in: int = Field(description="Seconds until the access token expires.")
+
+
+class UserView(BaseModel):
+    """An account, as its owner sees it.
+
+    There is no field here for a password hash, and that is the point of having
+    a response model at all: the ORM row has one, and this cannot carry it even
+    if someone passes the row in by mistake.
+    """
+
+    id: str
+    email: str
+    display_name: str | None = None
+    created_at: datetime
+    last_login_at: datetime | None = None
+
+
+class TicketResponse(BaseModel):
+    """A single-use credential for opening a progress stream."""
+
+    ticket: str
+    expires_in: int

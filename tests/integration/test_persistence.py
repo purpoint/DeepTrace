@@ -32,6 +32,7 @@ from core.pipeline import ResearchRun
 from infrastructure.db.models import AgentRunRow, EvidenceRow, SourceRow
 from infrastructure.db.recorder import PostgresRunRecorder
 from infrastructure.db.repositories.research import ResearchRepository
+from infrastructure.db.repositories.scope import Viewer
 
 pytestmark = [pytest.mark.integration]
 
@@ -129,7 +130,7 @@ class TestPersistingARun:
         self, db_session: AsyncSession
     ) -> None:
         """Research surviving a restart is the point of this milestone."""
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
 
         stored = await repo.get_session("res_1")
@@ -141,7 +142,7 @@ class TestPersistingARun:
     async def test_the_full_specification_is_stored(self, db_session: AsyncSession) -> None:
         """Reproducing a run means knowing exactly how the question was
         interpreted, not a summary of it."""
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
 
         stored = await repo.get_session("res_1")
@@ -151,7 +152,7 @@ class TestPersistingARun:
         assert stored.plan is not None
 
     async def test_sources_and_evidence_are_persisted(self, db_session: AsyncSession) -> None:
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
 
         sources = await repo.get_sources("res_1")
@@ -166,7 +167,7 @@ class TestPersistingARun:
         self, db_session: AsyncSession
     ) -> None:
         """Claim -> Evidence -> Source -> URL, now across a restart."""
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
 
         evidence = (await repo.get_evidence("res_1"))[0]
@@ -178,7 +179,7 @@ class TestPersistingARun:
 
     async def test_saving_twice_updates_rather_than_failing(self, db_session: AsyncSession) -> None:
         """A run is written while in progress and again on completion."""
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         run = make_run()
 
         await repo.save_run(run)
@@ -191,7 +192,7 @@ class TestPersistingARun:
 
     async def test_a_failed_run_is_still_recorded(self, db_session: AsyncSession) -> None:
         """Discarding it would leave an unexplained gap in a user's history."""
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         run = make_run("res_failed", sources=[])
         run.error = "ToolConfigurationError: no search key"
 
@@ -205,7 +206,7 @@ class TestPersistingARun:
     async def test_the_plan_is_stored_task_by_task(self, db_session: AsyncSession) -> None:
         from infrastructure.db.models import ResearchTaskRow
 
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
 
         tasks = (
@@ -229,7 +230,7 @@ class TestReferentialIntegrity:
     ) -> None:
         """The database refuses to hold untraceable evidence, which is what
         this whole system exists to prevent."""
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
 
         # A savepoint, so the expected failure rolls back only this insert and
@@ -255,7 +256,7 @@ class TestReferentialIntegrity:
         self, db_session: AsyncSession
     ) -> None:
         """Orphaned rows are how a sources table quietly becomes unqueryable."""
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
         await repo.delete_session("res_1")
         await db_session.flush()
@@ -267,7 +268,7 @@ class TestReferentialIntegrity:
     async def test_the_same_page_found_twice_is_stored_once(self, db_session: AsyncSession) -> None:
         """Two rows for one page would make a single source look like two
         independent corroborating sources."""
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         duplicates = [
             make_source("src_a", "https://kafka.apache.org/docs"),
             make_source("src_b", "https://kafka.apache.org/docs/?utm_source=x"),
@@ -300,7 +301,7 @@ class TestRunRecorderSwap:
         ).scalars().all() == []  # nothing written yet
 
     async def test_flushing_writes_the_buffer(self, db_session: AsyncSession) -> None:
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
 
         recorder = PostgresRunRecorder(db_session, research_id="res_1")
@@ -331,7 +332,7 @@ class TestRunRecorderSwap:
     ) -> None:
         """An agent deep in a call stack may not have the id, and a record
         without one cannot be found in the trace."""
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
 
         recorder = PostgresRunRecorder(db_session, research_id="res_1")
@@ -349,7 +350,7 @@ class TestRunRecorderSwap:
     ) -> None:
         """A retried job replays records it already wrote. Ignoring the
         conflict keeps recording idempotent and cost totals correct."""
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
 
         record = AgentRun(
@@ -369,7 +370,7 @@ class TestRunRecorderSwap:
         assert len(await repo.get_trace("res_1")) == 1
 
     async def test_the_trace_is_ordered_by_time(self, db_session: AsyncSession) -> None:
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
 
         recorder = PostgresRunRecorder(db_session, research_id="res_1")
@@ -404,7 +405,7 @@ class TestRunRecorderSwap:
 
 class TestCostAccounting:
     async def test_a_priced_run_totals_correctly(self, db_session: AsyncSession) -> None:
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
 
         recorder = PostgresRunRecorder(db_session, research_id="res_1")
@@ -429,7 +430,7 @@ class TestCostAccounting:
     ) -> None:
         """SUM() ignores NULLs, which would understate the total while looking
         authoritative. Free and unmeasured are different claims."""
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         await repo.save_run(make_run())
 
         recorder = PostgresRunRecorder(db_session, research_id="res_1")
@@ -462,7 +463,7 @@ class TestCostAccounting:
 
 class TestHistory:
     async def test_sessions_are_listed_newest_first(self, db_session: AsyncSession) -> None:
-        repo = ResearchRepository(db_session)
+        repo = ResearchRepository(db_session, Viewer.system())
         for index in range(3):
             await repo.save_run(make_run(f"res_{index}"))
         await db_session.flush()
@@ -504,8 +505,8 @@ class TestAnalysisPersistence:
             evidence_considered=4,
         )
 
-        await ResearchRepository(db_session).save_run(run)
-        stored = await ResearchRepository(db_session).get_session("res_analysis")
+        await ResearchRepository(db_session, Viewer.system()).save_run(run)
+        stored = await ResearchRepository(db_session, Viewer.system()).get_session("res_analysis")
 
         assert stored is not None
         assert stored.analysis is not None
@@ -522,8 +523,10 @@ class TestAnalysisPersistence:
             error="LLMServerError: 503",
         )
 
-        await ResearchRepository(db_session).save_run(run)
-        stored = await ResearchRepository(db_session).get_session("res_no_analysis")
+        await ResearchRepository(db_session, Viewer.system()).save_run(run)
+        stored = await ResearchRepository(db_session, Viewer.system()).get_session(
+            "res_no_analysis"
+        )
 
         assert stored is not None
         assert stored.analysis is None
@@ -573,7 +576,7 @@ class TestClaimPersistence:
         self, db_session: AsyncSession
     ) -> None:
         run = await self._run_with_claims()
-        repository = ResearchRepository(db_session)
+        repository = ResearchRepository(db_session, Viewer.system())
 
         await repository.save_run(run)
         stored = await repository.get_claims("res_claims")
@@ -588,7 +591,7 @@ class TestClaimPersistence:
         """The direction that matters when a source turns out to be wrong: a
         retracted page has to be traceable to everything built on it."""
         run = await self._run_with_claims()
-        repository = ResearchRepository(db_session)
+        repository = ResearchRepository(db_session, Viewer.system())
 
         await repository.save_run(run)
         resting = await repository.claims_resting_on("ev_1")
@@ -610,7 +613,7 @@ class TestClaimPersistence:
                 evidence=[EvidenceLink(evidence_id="ev_ghost", source_id="src_ghost")],
             )
         )
-        repository = ResearchRepository(db_session)
+        repository = ResearchRepository(db_session, Viewer.system())
 
         await repository.save_run(run)
         stored = await repository.get_claims("res_claims")
@@ -619,7 +622,7 @@ class TestClaimPersistence:
 
     async def test_deleting_a_run_removes_its_claims(self, db_session: AsyncSession) -> None:
         run = await self._run_with_claims()
-        repository = ResearchRepository(db_session)
+        repository = ResearchRepository(db_session, Viewer.system())
         await repository.save_run(run)
 
         await repository.delete_session("res_claims")
@@ -685,7 +688,7 @@ class TestVerificationPersistence:
             evidence_compared=1,
         )
 
-        repository = ResearchRepository(db_session)
+        repository = ResearchRepository(db_session, Viewer.system())
         await repository.save_run(run)
         stored = await repository.get_claims("res_verified")
 
@@ -738,7 +741,7 @@ class TestVerificationPersistence:
             ]
         )
 
-        repository = ResearchRepository(db_session)
+        repository = ResearchRepository(db_session, Viewer.system())
         await repository.save_run(run)
 
         assert len(await repository.get_claims("res_filtered")) == 2

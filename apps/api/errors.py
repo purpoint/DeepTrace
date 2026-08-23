@@ -47,6 +47,19 @@ class ErrorCode(StrEnum):
     UNAVAILABLE = "unavailable"
     INTERNAL = "internal"
 
+    UNAUTHENTICATED = "unauthenticated"
+    """No usable credential was presented."""
+
+    TOKEN_EXPIRED = "token_expired"  # noqa: S105 -- an error code, not a credential
+    """A credential that was valid and no longer is.
+
+    Split from ``unauthenticated`` because it is the one authentication failure
+    a client should handle silently: refresh and retry, rather than show a login
+    screen. It reveals nothing -- the expiry is written in the token the client
+    already holds."""
+
+    RATE_LIMITED = "rate_limited"
+
 
 class ApiError(Exception):
     """A failure the API knows how to describe.
@@ -63,12 +76,20 @@ class ApiError(Exception):
         *,
         http_status: int = status.HTTP_400_BAD_REQUEST,
         details: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.http_status = http_status
         self.details = details or {}
+        self.headers = headers or {}
+        """Response headers this failure requires.
+
+        Some errors are only complete with one: a 401 without
+        ``WWW-Authenticate`` does not say what scheme to use, and a 429 without
+        ``Retry-After`` leaves the client guessing how long to wait -- which it
+        will guess wrong, in the direction that hurts."""
 
     @classmethod
     def not_found(cls, what: str, identifier: str) -> ApiError:
@@ -77,6 +98,53 @@ class ApiError(Exception):
             f"No {what} with id {identifier}.",
             http_status=status.HTTP_404_NOT_FOUND,
             details={"id": identifier},
+        )
+
+    @classmethod
+    def unauthenticated(
+        cls, message: str = "Sign in to continue.", *, expired: bool = False
+    ) -> ApiError:
+        """No credential, or one that will not be honoured.
+
+        401, never 403. The two are routinely confused: 401 means "I do not know
+        who you are", 403 means "I know, and the answer is still no". Reading
+        another user's research is neither -- it is a 404, because a 403 would
+        confirm that the id exists.
+        """
+        return cls(
+            ErrorCode.TOKEN_EXPIRED if expired else ErrorCode.UNAUTHENTICATED,
+            message,
+            http_status=status.HTTP_401_UNAUTHORIZED,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    @classmethod
+    def invalid(cls, message: str) -> ApiError:
+        """A request this endpoint understood and will not act on.
+
+        422 rather than 400, matching what FastAPI's own validation returns, so
+        a client has one status to associate with "the body was wrong" instead
+        of two that mean the same thing.
+        """
+        return cls(
+            ErrorCode.INVALID_REQUEST,
+            message,
+            http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+
+    @classmethod
+    def conflict(cls, message: str) -> ApiError:
+        return cls(ErrorCode.CONFLICT, message, http_status=status.HTTP_409_CONFLICT)
+
+    @classmethod
+    def rate_limited(cls, retry_after: int, *, limit: int) -> ApiError:
+        """Too many requests, with the time to wait rather than a scolding."""
+        return cls(
+            ErrorCode.RATE_LIMITED,
+            f"Too many requests. Try again in {retry_after} seconds.",
+            http_status=status.HTTP_429_TOO_MANY_REQUESTS,
+            details={"retry_after": retry_after, "limit": limit},
+            headers={"Retry-After": str(retry_after)},
         )
 
     @classmethod
@@ -109,10 +177,13 @@ class ErrorResponse(BaseModel):
     error: ErrorBody
 
 
-def _render(error: ErrorBody, http_status: int) -> JSONResponse:
+def _render(
+    error: ErrorBody, http_status: int, headers: dict[str, str] | None = None
+) -> JSONResponse:
     return JSONResponse(
         status_code=http_status,
         content=ErrorResponse(error=error).model_dump(mode="json"),
+        headers=headers,
     )
 
 
@@ -124,6 +195,7 @@ def install_error_handlers(app: FastAPI) -> None:
         return _render(
             ErrorBody(code=exc.code, message=exc.message, details=exc.details),
             exc.http_status,
+            exc.headers,
         )
 
     @app.exception_handler(RequestValidationError)

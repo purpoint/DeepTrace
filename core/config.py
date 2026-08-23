@@ -179,7 +179,94 @@ class Settings(BaseSettings):
     run_log_path: Path = PROJECT_ROOT / "data" / "runs"
 
     # -- Security ----------------------------------------------------------
+    # No default. A signing key with a default is a signing key every
+    # deployment shares, and anyone who has read the source can mint a token
+    # for any account. The layer that signs demands it via require().
     jwt_secret: str | None = None
+
+    jwt_issuer: str = "deeptrace"
+    """Who minted a token. Checked on verification.
+
+    Cheap, and it stops a token issued by another service that happens to share
+    the secret -- a staging environment, a sibling application -- from being
+    accepted here."""
+
+    access_token_ttl_seconds: int = Field(
+        default=15 * 60,
+        ge=60,
+        description=(
+            "How long an access token is usable. Short, because it is verified "
+            "by signature alone and therefore cannot be revoked: the window in "
+            "which a stolen one works is exactly this number."
+        ),
+    )
+    refresh_token_ttl_seconds: int = Field(
+        default=14 * 24 * 60 * 60,
+        ge=300,
+        description=(
+            "How long a session survives without re-entering a password. Long, "
+            "which is affordable because refresh tokens are recorded server "
+            "side and can be revoked one at a time."
+        ),
+    )
+    ws_ticket_ttl_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=300,
+        description=(
+            "How long a WebSocket ticket is valid. Seconds, because a ticket "
+            "travels in a query string and query strings are written to access "
+            "logs -- it is worthless by the time anyone reads one."
+        ),
+    )
+
+    password_min_length: int = Field(default=12, ge=8)
+    password_max_length: int = Field(
+        default=1024,
+        description=(
+            "An upper bound is a denial-of-service control, not a password "
+            "policy. Argon2 is deliberately expensive, so an unbounded password "
+            "field is a way to make the server hash a megabyte on demand."
+        ),
+    )
+
+    # -- Rate limits -------------------------------------------------------
+    # Two different things are being protected, so they are two different
+    # policies. Authentication is protected from guessing, and is counted per
+    # client address because the attacker chooses the account. Research is
+    # protected from spending, and is counted per user because that is who the
+    # money belongs to.
+    auth_rate_limit: int = Field(default=10, ge=1)
+    auth_rate_window_seconds: int = Field(default=15 * 60, ge=1)
+    submit_rate_limit: int = Field(default=20, ge=1)
+    submit_rate_window_seconds: int = Field(default=60 * 60, ge=1)
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def _validate_jwt_secret(cls, value: str | None) -> str | None:
+        """Refuse a signing key short enough to be searched.
+
+        HS256 keys are brute-forceable offline: an attacker with one token can
+        try candidate keys as fast as their hardware allows, with no server
+        involved and nothing to rate limit. Thirty-two characters is the point
+        at which that stops being a weekend project.
+
+        Rejected at startup rather than at first login, because a key this weak
+        is a deployment mistake and the moment to find it is before anyone has
+        signed in with it.
+        """
+        if not value:
+            # An unset variable and one present but empty are the same
+            # intention. Treating "" as a two-character key would fail startup
+            # with a message about length, for a deployment that simply has not
+            # configured signing yet -- require() gives a better one.
+            return None
+        if len(value) < 32:
+            raise ValueError(
+                "jwt_secret must be at least 32 characters. "
+                "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+            )
+        return value
 
     @field_validator("log_level")
     @classmethod

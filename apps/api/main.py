@@ -27,7 +27,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from apps.api.errors import install_error_handlers
-from apps.api.routes import events, research
+from apps.api.routes import auth, events, research
 from apps.api.schemas import HealthResponse
 from core.config import Settings, get_settings
 from core.logging import configure_logging, get_logger
@@ -46,6 +46,10 @@ against the evidence, and writes a report citing only what survived.
 Research is asynchronous. `POST /research` returns immediately with a research
 id; poll `GET /research/{id}` for progress, and read the result from the report,
 claims, evidence, sources, and trace endpoints.
+
+Every research endpoint requires a bearer token from `POST /auth/login`, and
+answers only for the research belonging to that account. A run someone else owns
+is reported as though it does not exist.
 """
 
 
@@ -66,14 +70,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.error("api.database_unavailable", error_type=type(exc).__name__, error=str(exc))
 
     app.state.events = None
+    app.state.sessions = None
+    app.state.limiter = None
 
     try:
+        from infrastructure.auth.sessions import SessionStore
         from infrastructure.queue.events import RedisProgressStream
         from infrastructure.queue.redis_queue import RedisJobQueue
+        from infrastructure.rate_limit import RateLimiter
 
         queue = RedisJobQueue.from_settings(settings)
         await queue.client.ping()
         app.state.queue = queue
+
+        # Sessions and rate limits share the queue's connection. Both issue
+        # ordinary commands and neither holds one open, so a third client would
+        # be three connection pools where one does.
+        app.state.sessions = SessionStore(queue.client)
+        app.state.limiter = RateLimiter(queue.client)
 
         # A separate client for the event stream. A connection running a
         # pub/sub subscription cannot serve ordinary commands, and sharing one
@@ -132,6 +146,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     install_error_handlers(app)
+    app.include_router(auth.router)
     app.include_router(research.router)
     app.include_router(events.router)
 

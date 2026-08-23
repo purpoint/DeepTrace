@@ -9,6 +9,11 @@ The properties that matter here are not about research. They are about a client
 being able to rely on the service: that submitting returns immediately, that a
 run can be polled from the moment it is submitted, that failures all look the
 same, and that nothing internal leaks out of one.
+
+Every request here is signed in, because every research endpoint requires it.
+The fixture registers a real account through the real endpoint rather than
+minting a token directly -- a token built by the test would prove the routes
+accept tokens the test knows how to make, which is not the same claim.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import AsyncIterator
+from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -23,16 +29,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from apps.api.main import create_app
 from core.config import ResearchDepth, Settings
+from infrastructure.auth.sessions import SessionStore
 from infrastructure.queue.redis_queue import PENDING, RedisJobQueue
+from infrastructure.rate_limit import RateLimiter
 
 pytestmark = [pytest.mark.integration]
 
 TEST_REDIS_URL = os.getenv("TEST_REDIS_URL", "redis://localhost:6379/15")
 
+TEST_JWT_SECRET = "a-test-signing-key-long-enough-to-pass-validation"
+
 
 @pytest.fixture
-async def api(migrated_database: str) -> AsyncIterator[AsyncClient]:
-    """The real application, wired to the test database and test Redis.
+async def anonymous(migrated_database: str) -> AsyncIterator[AsyncClient]:
+    """The real application, wired to test infrastructure, with nobody signed in.
 
     Built through create_app rather than by importing a module-level instance,
     which is what lets this point at test infrastructure instead of whatever the
@@ -44,6 +54,7 @@ async def api(migrated_database: str) -> AsyncIterator[AsyncClient]:
         redis_url=TEST_REDIS_URL,
         google_api_key="test-key",
         tavily_api_key="test-key",
+        jwt_secret=TEST_JWT_SECRET,
     )
     app = create_app(settings)
 
@@ -55,6 +66,13 @@ async def api(migrated_database: str) -> AsyncIterator[AsyncClient]:
     await queue.client.flushdb()
     app.state.queue = queue
 
+    # The lifespan is not run here -- the transport speaks ASGI directly -- so
+    # everything it would have built has to be built by hand. Missing one is
+    # not a silent failure: the dependency reports the service as unavailable,
+    # which is what a real outage would look like too.
+    app.state.sessions = SessionStore(queue.client)
+    app.state.limiter = RateLimiter(queue.client)
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
@@ -62,6 +80,40 @@ async def api(migrated_database: str) -> AsyncIterator[AsyncClient]:
     await queue.client.flushdb()
     await queue.close()
     await engine.dispose()
+
+
+async def register(
+    client: AsyncClient, email: str, password: str = "a-long-enough-password"
+) -> str:
+    """Create an account and leave the client signed in as it. Returns the id."""
+    response = await client.post("/auth/register", json={"email": email, "password": password})
+    assert response.status_code == 201, response.text
+    client.headers["Authorization"] = f"Bearer {response.json()['access_token']}"
+    return str((await client.get("/auth/me")).json()["id"])
+
+
+@pytest.fixture
+async def api(anonymous: AsyncClient) -> AsyncClient:
+    """The application with a signed-in account. What most tests want.
+
+    A fresh address per test. The Redis flush between tests does not reach
+    PostgreSQL, so a fixed address would be registered once and conflict for
+    every test after -- and the failure would appear in setup, where it reads
+    as a broken fixture rather than as leaked state.
+    """
+    await register(anonymous, f"owner-{uuid4().hex[:12]}@example.com")
+    return anonymous
+
+
+@pytest.fixture
+async def owner_id(api: AsyncClient) -> str:
+    """The id of the account the ``api`` fixture is signed in as.
+
+    Runs saved directly into the database have to be attributed to it, or the
+    scoped repository behind every endpoint will correctly refuse to show them
+    -- which would look like a broken endpoint rather than a working one.
+    """
+    return str((await api.get("/auth/me")).json()["id"])
 
 
 class TestSubmitting:
@@ -148,7 +200,7 @@ class TestPollingBeforeThereIsAnything:
 
 class TestReadingAFinishedRun:
     @pytest.fixture
-    async def finished(self, api: AsyncClient) -> str:
+    async def finished(self, api: AsyncClient, owner_id: str) -> str:
         """A completed run written straight to the database.
 
         The research itself is not exercised here: what is under test is
@@ -169,6 +221,7 @@ class TestReadingAFinishedRun:
         from core.models.run import ResearchRun
         from core.models.source import Source, SourceType
         from infrastructure.db.repositories.research import ResearchRepository
+        from infrastructure.db.repositories.scope import Viewer
 
         source = Source(
             id="src_api_1",
@@ -248,7 +301,8 @@ class TestReadingAFinishedRun:
 
         factory = api._transport.app.state.session_factory  # type: ignore[attr-defined]
         async with factory() as session:
-            await ResearchRepository(session).save_run(run)
+            repository = ResearchRepository(session, Viewer.system())
+            await repository.save_run(run, user_id=owner_id)
             await session.commit()
         return run.research_id
 
@@ -301,12 +355,13 @@ class TestReadingAFinishedRun:
         assert claim["text"].startswith("Kafka preserves")
 
     async def test_a_run_with_no_report_says_so_rather_than_returning_an_empty_one(
-        self, api: AsyncClient
+        self, api: AsyncClient, owner_id: str
     ) -> None:
         """A report that has not been written and one that says nothing are
         different outcomes."""
         from core.models.run import ResearchRun
         from infrastructure.db.repositories.research import ResearchRepository
+        from infrastructure.db.repositories.scope import Viewer
 
         run = ResearchRun(
             research_id="res_api_noreport",
@@ -316,7 +371,8 @@ class TestReadingAFinishedRun:
         )
         factory = api._transport.app.state.session_factory  # type: ignore[attr-defined]
         async with factory() as session:
-            await ResearchRepository(session).save_run(run)
+            repository = ResearchRepository(session, Viewer.system())
+            await repository.save_run(run, user_id=owner_id)
             await session.commit()
 
         response = await api.get("/research/res_api_noreport/report")

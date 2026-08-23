@@ -13,6 +13,13 @@ page it came from, one endpoint at a time.
 Submitting never runs research. It writes a job and returns, because a research
 run takes minutes and an HTTP request that waits for one has already failed --
 the client times out, retries, and now two runs are in flight for one question.
+
+Every one of them is scoped to the caller, and almost none of them say so. The
+repository these routes are handed can only see its owner's research, so a
+request for a stranger's run returns nothing and becomes a 404 without any route
+comparing two ids. The exception is the job record, which lives in Redis rather
+than behind that repository -- and the ownership check for it is written out
+explicitly below, because it is the one place the structure does not do it.
 """
 
 from __future__ import annotations
@@ -21,7 +28,8 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, status
 
-from apps.api.dependencies.providers import Queue, Repository
+from apps.api.dependencies.identity import Authenticated, CurrentUser, Repository
+from apps.api.dependencies.providers import Config, Limiter, Queue
 from apps.api.errors import ApiError
 from apps.api.schemas import (
     CancelResponse,
@@ -40,6 +48,7 @@ from apps.api.schemas import (
 from core.logging import get_logger
 from infrastructure.db.models import AgentRunRow
 from infrastructure.queue.job import Job
+from infrastructure.queue.redis_queue import RedisJobQueue
 
 log = get_logger(__name__)
 
@@ -52,17 +61,40 @@ router = APIRouter(prefix="/research", tags=["research"])
     status_code=status.HTTP_202_ACCEPTED,
     summary="Ask a question",
 )
-async def submit(body: SubmitRequest, queue: Queue) -> SubmitResponse:
+async def submit(
+    body: SubmitRequest,
+    queue: Queue,
+    user: Authenticated,
+    limiter: Limiter,
+    settings: Config,
+) -> SubmitResponse:
     """Queue a research job and return immediately.
 
     202 rather than 201: nothing has been created yet except the intention. The
     research does not exist until a worker has run it, and saying otherwise
     would make a client that follows the Location header find nothing there.
+
+    Rate limited per user rather than per address, because what this limit
+    protects is money. A research run costs model calls and search credits, and
+    the account is who those are spent on -- counting by address would let one
+    person on two networks spend twice, and charge two colleagues in one office
+    as though they were one.
     """
+    decision = await limiter.check(
+        "submit",
+        user.id,
+        limit=settings.submit_rate_limit,
+        window=settings.submit_rate_window_seconds,
+    )
+    if not decision.allowed:
+        log.warning("api.submit_rate_limited", user_id=user.id)
+        raise ApiError.rate_limited(decision.retry_after, limit=decision.limit)
+
     job = Job(
         question=body.question,
         depth=body.depth,
         max_tasks=body.max_tasks,
+        user_id=user.id,
     )
 
     try:
@@ -73,7 +105,7 @@ async def submit(body: SubmitRequest, queue: Queue) -> SubmitResponse:
         log.error("api.enqueue_failed", error_type=type(exc).__name__, error=str(exc))
         raise ApiError.unavailable("The job queue") from exc
 
-    log.info("api.submitted", job_id=job.id, research_id=job.research_id)
+    log.info("api.submitted", job_id=job.id, research_id=job.research_id, user_id=user.id)
     return SubmitResponse(
         job_id=job.id,
         research_id=job.research_id,
@@ -87,11 +119,16 @@ async def list_research(
     repository: Repository,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> list[ResearchSummary]:
-    """Research history, newest first.
+    """The caller's research history, newest first.
 
     Bounded by default and capped at a hundred. An unbounded list endpoint is
     fine until the table is large, and then it is the query that takes the
     service down.
+
+    No user filter appears here. The repository was built scoped to the caller,
+    so the filter is in the query it issues -- which is the difference between
+    an endpoint that shows the right rows and an endpoint that shows the right
+    rows as long as this line is not deleted.
     """
     sessions = await repository.list_sessions(limit=limit)
     return [
@@ -109,7 +146,9 @@ async def list_research(
 
 
 @router.get("/{research_id}", response_model=ResearchDetail, summary="One run")
-async def get_research(research_id: str, repository: Repository, queue: Queue) -> ResearchDetail:
+async def get_research(
+    research_id: str, repository: Repository, queue: Queue, user: Authenticated
+) -> ResearchDetail:
     """A run's status and size, from whichever record exists.
 
     A run that has been queued but not yet archived has no database row -- the
@@ -119,7 +158,7 @@ async def get_research(research_id: str, repository: Repository, queue: Queue) -
     them.
     """
     row = await repository.get_session(research_id)
-    job = await _job_for(queue, research_id)
+    job = await _job_for(queue, research_id, user)
 
     if row is None:
         if job is None:
@@ -339,7 +378,9 @@ async def get_trace(research_id: str, repository: Repository) -> TraceView:
 
 
 @router.post("/{research_id}/cancel", response_model=CancelResponse, summary="Stop a run")
-async def cancel(research_id: str, repository: Repository, queue: Queue) -> CancelResponse:
+async def cancel(
+    research_id: str, repository: Repository, queue: Queue, user: Authenticated
+) -> CancelResponse:
     """Ask a running job to stop, and stop it spending.
 
     Cancellation reaches the worker as a flag rather than a signal, because the
@@ -347,7 +388,7 @@ async def cancel(research_id: str, repository: Repository, queue: Queue) -> Canc
     task, which stops the model calls -- marking a job cancelled while its calls
     continue would be a status that lies and a bill that grows.
     """
-    job = await _job_for(queue, research_id)
+    job = await _job_for(queue, research_id, user)
     if job is None:
         await _require_research(repository, research_id)
         return CancelResponse(
@@ -374,6 +415,21 @@ async def _require_research(repository: Repository, research_id: str) -> None:
         raise ApiError.not_found("research", research_id)
 
 
-async def _job_for(queue: Queue, research_id: str) -> Job | None:
-    """The job behind a run, looked up by index rather than by scanning."""
-    return await queue.get_by_research(research_id)
+async def _job_for(queue: RedisJobQueue, research_id: str, user: CurrentUser) -> Job | None:
+    """The job behind a run, if it is this user's job.
+
+    The one ownership check written by hand in this module, and it is here
+    because the job lives in Redis rather than behind the scoped repository --
+    so nothing filters it unless this does.
+
+    It is load-bearing. A queued run has no database row yet, which is exactly
+    why ``get_research`` falls back to the job: without this comparison, anyone
+    who guessed a research id could read the question someone else had just
+    asked, during the only window in which the repository has nothing to refuse
+    them with. And cancelling is worse than reading -- it would let a stranger
+    stop a stranger's work.
+    """
+    job = await queue.get_by_research(research_id)
+    if job is None or job.user_id != user.id:
+        return None
+    return job
