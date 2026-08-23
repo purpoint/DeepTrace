@@ -81,7 +81,7 @@ export function ProgressView({ detail }: { detail: ResearchDetail }) {
             <button
               onClick={() => cancel.mutate()}
               disabled={cancel.isPending}
-              className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+              className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:border-verdict-unsupported/50 hover:text-verdict-unsupported"
             >
               {cancel.isPending ? "Stopping…" : "Stop"}
             </button>
@@ -95,22 +95,19 @@ export function ProgressView({ detail }: { detail: ResearchDetail }) {
             return (
               <li key={stage.key} className="flex items-center gap-3 text-sm">
                 <span
-                  className={`flex h-5 w-5 items-center justify-center rounded-full text-[11px] ${
+                  className={`flex h-5 w-5 items-center justify-center rounded-full text-[11px] transition-colors ${
                     done
-                      ? "bg-green-600 text-white"
+                      ? "bg-verdict-supported/15 text-verdict-supported"
                       : active
-                        ? "bg-slate-900 text-white"
-                        : "bg-slate-200 text-slate-500"
+                        ? "animate-pulse-ring bg-brand text-canvas"
+                        : "bg-raised text-faint"
                   }`}
                 >
                   {done ? "✓" : index + 1}
                 </span>
-                <span className={done || active ? "text-slate-900" : "text-slate-400"}>
+                <span className={done || active ? "text-ink" : "text-faint"}>
                   {stage.label}
                 </span>
-                {active ? (
-                  <span className="h-2 w-2 animate-pulse rounded-full bg-slate-900" />
-                ) : null}
               </li>
             );
           })}
@@ -121,22 +118,28 @@ export function ProgressView({ detail }: { detail: ResearchDetail }) {
         {events.length === 0 ? (
           <Spinner label="Waiting for the worker to pick this up…" />
         ) : (
-          <ul className="space-y-2 font-mono text-xs">
+          <ul className="space-y-2.5 font-mono text-xs">
             {events.map((event) => (
-              <li key={event.sequence} className="flex gap-3">
-                <span className="w-6 shrink-0 text-right text-slate-400">
+              // Each event animates in as it arrives, which is what makes the
+              // stream feel live rather than like a list that keeps redrawing.
+              <li key={event.sequence} className="flex animate-slide-in gap-3">
+                <span className="w-5 shrink-0 text-right text-faint tabular-nums">
                   {event.sequence}
                 </span>
                 <span
                   className={`w-40 shrink-0 ${
-                    event.kind === "failed" ? "text-red-700" : "text-slate-500"
+                    event.kind === "failed"
+                      ? "text-verdict-unsupported"
+                      : event.kind === "completed"
+                        ? "text-verdict-supported"
+                        : "text-brand/70"
                   }`}
                 >
                   {event.kind}
                 </span>
                 {/* Rendered as text. The message can quote a page title, which
                     came from a site we do not control. */}
-                <span className="text-slate-800">{event.message}</span>
+                <span className="text-muted">{event.message}</span>
               </li>
             ))}
           </ul>

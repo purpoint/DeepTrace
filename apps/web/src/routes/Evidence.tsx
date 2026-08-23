@@ -35,7 +35,7 @@ export function Evidence({ researchId, ready }: { researchId: string; ready: boo
       title="Evidence"
       subtitle={`${all.length} passages, ${verbatim} found word for word in their page`}
       actions={
-        <label className="flex items-center gap-2 text-xs text-slate-600">
+        <label className="flex cursor-pointer items-center gap-2 text-xs text-muted">
           <input
             type="checkbox"
             checked={quotedOnly}
@@ -48,23 +48,23 @@ export function Evidence({ researchId, ready }: { researchId: string; ready: boo
       {shown.length === 0 ? (
         <Empty>No passages match.</Empty>
       ) : (
-        <ul className="divide-y divide-slate-100">
+        <ul className="divide-y divide-line">
           {shown.map((item) => {
             const source = byId.get(item.source_id);
             return (
               <li key={item.id} className="py-4">
-                <p className="text-sm font-medium text-slate-900">{item.claim}</p>
-                <blockquote className="mt-1 border-l-2 border-slate-200 pl-3 text-sm text-slate-600">
+                <p className="text-sm font-medium leading-6 text-ink">{item.claim}</p>
+                <blockquote className="mt-1.5 border-l-2 border-brand/30 pl-3 text-sm leading-6 text-muted">
                   “{item.supporting_text}”
                 </blockquote>
-                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                <div className="mt-2.5 flex flex-wrap items-center gap-2.5 text-xs text-faint">
                   <QuoteBadge status={item.quote_status} />
                   {source ? (
                     <a
                       href={source.url}
                       target="_blank"
                       rel="noopener noreferrer nofollow ugc"
-                      className="text-blue-700 hover:underline"
+                      className="text-brand hover:underline"
                     >
                       {source.domain}
                     </a>

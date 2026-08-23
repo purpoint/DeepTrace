@@ -60,7 +60,7 @@ export function Workspace() {
           }
           reference={error.reference}
         />
-        <Link to="/" className="mt-4 inline-block text-sm text-blue-700 hover:underline">
+        <Link to="/" className="mt-4 inline-block text-sm text-brand hover:underline">
           Ask something else
         </Link>
       </div>
@@ -78,51 +78,83 @@ export function Workspace() {
   ];
 
   return (
-    <div className="mx-auto max-w-4xl px-6 py-8">
-      <header className="mb-6">
+    <div className="mx-auto max-w-5xl px-6 py-10">
+      <header className="mb-7 animate-fade-up">
         {/* The user's own question. Rendered as text regardless. */}
-        <h1 className="text-xl font-semibold text-slate-900">{detail.data.question}</h1>
-        <p className="mt-1 text-xs text-slate-500">
-          {detail.data.depth} · started {relativeTime(detail.data.created_at)} ·{" "}
-          <span className={finished ? "" : "text-slate-900"}>{status}</span>
+        <h1 className="text-2xl font-semibold leading-snug tracking-tight text-ink">
+          {detail.data.question}
+        </h1>
+        <p className="mt-2 flex flex-wrap items-center gap-x-2 text-xs text-faint">
+          <span className="rounded bg-raised px-1.5 py-0.5 font-mono">
+            {detail.data.depth}
+          </span>
+          <span>started {relativeTime(detail.data.created_at)}</span>
+          <span>·</span>
+          <span
+            className={
+              finished
+                ? status === "completed"
+                  ? "text-verdict-supported"
+                  : "text-verdict-partial"
+                : "flex items-center gap-1.5 text-brand"
+            }
+          >
+            {!finished ? (
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
+            ) : null}
+            {status}
+          </span>
           {detail.data.job && detail.data.job.attempts > 1
             ? ` · attempt ${detail.data.job.attempts}`
             : ""}
         </p>
         {detail.data.error ? (
-          <p className="mt-2 rounded bg-red-50 px-3 py-2 text-sm text-red-800">
+          <p className="mt-3 rounded-xl bg-verdict-unsupported/10 px-3.5 py-2.5 text-sm text-verdict-unsupported ring-1 ring-inset ring-verdict-unsupported/25">
             {detail.data.error}
           </p>
         ) : null}
       </header>
 
-      <nav className="mb-4 flex gap-1 border-b border-slate-200">
+      <nav className="mb-5 flex gap-1 overflow-x-auto border-b border-line">
         {tabs.map((entry) => (
           <button
             key={entry.key}
             onClick={() => setTab(entry.key)}
-            className={`-mb-px border-b-2 px-3 py-2 text-sm ${
+            className={`-mb-px shrink-0 border-b-2 px-3.5 py-2.5 text-sm transition-colors ${
               tab === entry.key
-                ? "border-slate-900 font-medium text-slate-900"
-                : "border-transparent text-slate-500 hover:text-slate-800"
+                ? "border-brand font-medium text-ink"
+                : "border-transparent text-muted hover:border-line hover:text-ink"
             }`}
           >
             {entry.label}
             {entry.count ? (
-              <span className="ml-1.5 text-xs text-slate-400">{entry.count}</span>
+              <span
+                className={`ml-1.5 rounded px-1.5 py-0.5 text-[11px] tabular-nums ${
+                  tab === entry.key ? "bg-brand/15 text-brand" : "bg-raised text-faint"
+                }`}
+              >
+                {entry.count}
+              </span>
             ) : null}
           </button>
         ))}
       </nav>
 
-      {tab === "progress" ? <ProgressView detail={detail.data} /> : null}
-      {tab === "report" ? <Report researchId={researchId} ready={detail.data.has_report} /> : null}
-      {tab === "claims" ? <Claims researchId={researchId} ready={ready} /> : null}
-      {tab === "evidence" ? <Evidence researchId={researchId} ready={ready} /> : null}
-      {tab === "sources" ? (
-        <Sources researchId={researchId} ready={detail.data.sources > 0} />
-      ) : null}
-      {tab === "trace" ? <Trace researchId={researchId} ready={finished} /> : null}
+      {/* Keyed by tab so React remounts on every switch, which replays the
+          entrance animation. Without the key the panel changes contents in
+          place and the transition only ever plays once. */}
+      <div key={tab} className="animate-slide-in">
+        {tab === "progress" ? <ProgressView detail={detail.data} /> : null}
+        {tab === "report" ? (
+          <Report researchId={researchId} ready={detail.data.has_report} />
+        ) : null}
+        {tab === "claims" ? <Claims researchId={researchId} ready={ready} /> : null}
+        {tab === "evidence" ? <Evidence researchId={researchId} ready={ready} /> : null}
+        {tab === "sources" ? (
+          <Sources researchId={researchId} ready={detail.data.sources > 0} />
+        ) : null}
+        {tab === "trace" ? <Trace researchId={researchId} ready={finished} /> : null}
+      </div>
     </div>
   );
 }

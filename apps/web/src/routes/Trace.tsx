@@ -21,21 +21,21 @@ function Entry({ entry, offsetMs }: { entry: TraceEntry; offsetMs: number }) {
 
   return (
     <li className="flex gap-3 py-2 font-mono text-xs">
-      <span className="w-16 shrink-0 text-right text-slate-400 tabular-nums">
+      <span className="w-14 shrink-0 text-right text-faint tabular-nums">
         +{(offsetMs / 1000).toFixed(1)}s
       </span>
       <span
         className={`w-12 shrink-0 ${
-          entry.kind === "model" ? "text-violet-700" : "text-teal-700"
+          entry.kind === "model" ? "text-verdict-conflicting" : "text-brand"
         }`}
       >
         {entry.kind}
       </span>
-      <span className="w-40 shrink-0 truncate text-slate-800">{entry.name}</span>
-      <span className="w-16 shrink-0 text-right text-slate-500 tabular-nums">
+      <span className="w-40 shrink-0 truncate text-ink">{entry.name}</span>
+      <span className="w-16 shrink-0 text-right text-muted tabular-nums">
         {entry.latency_ms.toFixed(0)}ms
       </span>
-      <span className={`flex-1 truncate ${failed ? "text-red-700" : "text-slate-500"}`}>
+      <span className={`flex-1 truncate ${failed ? "text-verdict-unsupported" : "text-faint"}`}>
         {entry.kind === "model"
           ? `${detail.model ?? ""} · ${detail.input_tokens ?? 0} in / ${detail.output_tokens ?? 0} out`
           : `${detail.task_id ?? ""} ${detail.result_count != null ? `· ${detail.result_count} results` : ""}`}
@@ -71,8 +71,8 @@ export function Trace({ researchId, ready }: { researchId: string; ready: boolea
             ["Report", detail.data?.has_report ? "written from verified claims" : "not written"],
           ].map(([label, value]) => (
             <li key={label} className="flex gap-3">
-              <span className="w-40 shrink-0 text-slate-500">{label}</span>
-              <span className="text-slate-900">{value}</span>
+              <span className="w-40 shrink-0 text-faint">{label}</span>
+              <span className="text-ink">{value}</span>
             </li>
           ))}
         </ol>
@@ -82,7 +82,7 @@ export function Trace({ researchId, ready }: { researchId: string; ready: boolea
         title="Calls"
         subtitle={`${models} model calls, ${tools} tool calls, ${trace.data?.total_tokens.toLocaleString() ?? 0} tokens`}
         actions={
-          <span className="text-xs text-slate-500">
+          <span className="rounded bg-raised px-2 py-0.5 font-mono text-xs text-muted">
             {trace.data?.cost_usd == null
               ? "cost not measured"
               : `$${trace.data.cost_usd.toFixed(4)}`}
@@ -92,7 +92,7 @@ export function Trace({ researchId, ready }: { researchId: string; ready: boolea
         {entries.length === 0 ? (
           <Empty>No calls were recorded.</Empty>
         ) : (
-          <ol className="divide-y divide-slate-50">
+          <ol className="divide-y divide-line/50">
             {entries.map((entry, index) => (
               <Entry
                 key={`${entry.started_at}-${index}`}

@@ -1,10 +1,14 @@
 /**
  * The small shared pieces.
  *
+ * Colours come from theme variables, so a component says `bg-surface` and is
+ * correct in both themes. Writing `bg-white dark:bg-slate-900` on every element
+ * is the same design maintained twice, and the copy is what drifts.
+ *
  * A claim's status has one colour wherever it appears. A verdict rendered green
- * on the report page and grey on the claims page reads to a user as two
- * different verdicts, and the whole point of the verification layer is that a
- * reader can tell supported from unsupported at a glance.
+ * on the report page and grey on the claims page reads as two different
+ * verdicts, and telling supported from unsupported at a glance is the entire
+ * point of the verification layer.
  */
 
 import type { ReactNode } from "react";
@@ -12,11 +16,11 @@ import type { ReactNode } from "react";
 import type { ClaimStatus } from "../api/types";
 
 const STATUS_STYLE: Record<string, string> = {
-  supported: "bg-green-50 text-green-800 ring-green-600/20",
-  partially_supported: "bg-amber-50 text-amber-800 ring-amber-600/20",
-  unsupported: "bg-red-50 text-red-800 ring-red-600/20",
-  conflicting: "bg-violet-50 text-violet-800 ring-violet-600/20",
-  proposed: "bg-slate-100 text-slate-700 ring-slate-500/20",
+  supported: "bg-verdict-supported/10 text-verdict-supported ring-verdict-supported/25",
+  partially_supported: "bg-verdict-partial/10 text-verdict-partial ring-verdict-partial/25",
+  unsupported: "bg-verdict-unsupported/10 text-verdict-unsupported ring-verdict-unsupported/25",
+  conflicting: "bg-verdict-conflicting/10 text-verdict-conflicting ring-verdict-conflicting/25",
+  proposed: "bg-raised text-muted ring-line",
 };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -30,7 +34,7 @@ const STATUS_LABEL: Record<string, string> = {
 export function StatusBadge({ status }: { status: ClaimStatus | string }) {
   return (
     <span
-      className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${
+      className={`inline-flex shrink-0 items-center rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${
         STATUS_STYLE[status] ?? STATUS_STYLE.proposed
       }`}
     >
@@ -43,14 +47,15 @@ export function StatusBadge({ status }: { status: ClaimStatus | string }) {
  *
  *  Shown distinctly from a quotation because they are different kinds of
  *  support: a paraphrase was matched by token overlap, so the wording the claim
- *  relies on is not the wording that was checked. Rendering them identically
- *  would present the weaker one as the stronger. */
+ *  relies on is not the wording that was checked. */
 export function QuoteBadge({ status }: { status: string }) {
   const quoted = status === "verbatim" || status === "normalised";
   return (
     <span
       className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[11px] ${
-        quoted ? "bg-slate-100 text-slate-600" : "bg-amber-50 text-amber-700"
+        quoted
+          ? "bg-verdict-supported/10 text-verdict-supported"
+          : "bg-verdict-partial/10 text-verdict-partial"
       }`}
       title={
         quoted
@@ -75,11 +80,11 @@ export function Panel({
   actions?: ReactNode;
 }) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-white">
-      <header className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-3">
+    <section className="overflow-hidden rounded-xl border border-line bg-surface shadow-sm">
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-line px-5 py-3.5">
         <div>
-          <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
-          {subtitle ? <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p> : null}
+          <h2 className="text-sm font-semibold tracking-tight text-ink">{title}</h2>
+          {subtitle ? <p className="mt-0.5 text-xs text-faint">{subtitle}</p> : null}
         </div>
         {actions}
       </header>
@@ -89,13 +94,13 @@ export function Panel({
 }
 
 export function Empty({ children }: { children: ReactNode }) {
-  return <p className="py-8 text-center text-sm text-slate-500">{children}</p>;
+  return <p className="py-10 text-center text-sm text-faint">{children}</p>;
 }
 
 export function Spinner({ label }: { label: string }) {
   return (
-    <div className="flex items-center gap-2 py-8 text-sm text-slate-500">
-      <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" />
+    <div className="flex items-center gap-2.5 py-10 text-sm text-faint">
+      <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-line border-t-brand" />
       {label}
     </div>
   );
@@ -103,8 +108,8 @@ export function Spinner({ label }: { label: string }) {
 
 /** A failure the user can act on.
  *
- *  Retryable failures get a button; the rest get an explanation. Offering
- *  "try again" for a 404 teaches people that the button does nothing. */
+ *  Retryable failures get a button; the rest get an explanation. Offering "try
+ *  again" for a 404 teaches people the button does nothing. */
 export function Failure({
   message,
   onRetry,
@@ -118,15 +123,15 @@ export function Failure({
   reference?: string | undefined;
 }) {
   return (
-    <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+    <div className="rounded-xl border border-verdict-unsupported/30 bg-verdict-unsupported/5 px-4 py-3 text-sm text-verdict-unsupported">
       <p>{message}</p>
       {reference ? (
-        <p className="mt-1 font-mono text-xs text-red-600">reference {reference}</p>
+        <p className="mt-1 font-mono text-xs opacity-70">reference {reference}</p>
       ) : null}
       {onRetry ? (
         <button
           onClick={onRetry}
-          className="mt-2 rounded bg-red-100 px-2 py-1 text-xs font-medium hover:bg-red-200"
+          className="mt-2 rounded-md bg-verdict-unsupported/10 px-2.5 py-1 text-xs font-medium hover:bg-verdict-unsupported/20"
         >
           Try again
         </button>

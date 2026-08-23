@@ -34,7 +34,7 @@ export function Sources({ researchId, ready }: { researchId: string; ready: bool
       {all.length === 0 ? (
         <Empty>No sources were retrieved.</Empty>
       ) : (
-        <ul className="divide-y divide-slate-100">
+        <ul className="divide-y divide-line">
           {all.map((source) => (
             <li key={source.id} className="flex items-start justify-between gap-4 py-3">
               <div className="min-w-0">
@@ -42,28 +42,28 @@ export function Sources({ researchId, ready }: { researchId: string; ready: bool
                   href={source.url}
                   target="_blank"
                   rel="noopener noreferrer nofollow ugc"
-                  className="block truncate text-sm font-medium text-blue-700 hover:underline"
+                  className="block truncate text-sm font-medium text-ink transition-colors hover:text-brand"
                 >
                   {/* A page title, written by whoever owns the page. Text only. */}
                   {source.title || source.url}
                 </a>
-                <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-faint">
                   <span>{source.domain}</span>
-                  <span className="rounded bg-slate-100 px-1.5 py-0.5">
+                  <span className="rounded bg-raised px-1.5 py-0.5 font-mono">
                     {TYPE_LABEL[source.source_type] ?? source.source_type}
                   </span>
                   <span>{source.word_count.toLocaleString()} words</span>
                   <span>{relativeTime(source.retrieved_at)}</span>
                   {source.fetch_failed ? (
-                    <span className="text-amber-700">could not be fetched</span>
+                    <span className="text-verdict-partial">could not be fetched</span>
                   ) : null}
                 </div>
               </div>
               <div className="shrink-0 text-right">
-                <div className="text-sm font-medium tabular-nums text-slate-900">
+                <div className="text-sm font-medium tabular-nums text-ink">
                   {source.quality_score.toFixed(2)}
                 </div>
-                <div className="text-[11px] text-slate-400">quality</div>
+                <div className="text-[11px] text-faint">quality</div>
               </div>
             </li>
           ))}

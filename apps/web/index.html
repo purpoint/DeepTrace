@@ -3,9 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>DeepTrace</title>
+    <title>DeepTrace — research you can check</title>
+    <meta
+      name="description"
+      content="Autonomous research that shows its work: every claim cites a passage, and every passage is checked against the page it came from."
+    />
+    <script>
+      // Applied before React renders. Doing this in an effect means the first
+      // paint is the wrong theme, and every visitor to a dark site sees a white
+      // flash on every page load.
+      (function () {
+        try {
+          var stored = localStorage.getItem("deeptrace.theme");
+          var dark =
+            stored === "dark" ||
+            (stored !== "light" &&
+              !window.matchMedia("(prefers-color-scheme: light)").matches);
+          if (dark) document.documentElement.classList.add("dark");
+        } catch (e) {
+          document.documentElement.classList.add("dark");
+        }
+      })();
+    </script>
   </head>
-  <body class="bg-slate-50 text-slate-900 antialiased">
+  <body class="antialiased">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

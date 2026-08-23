@@ -25,36 +25,36 @@ function Claim({ claim }: { claim: ClaimView }) {
     <li className="py-4">
       <div className="flex items-start justify-between gap-4">
         {/* Text, always. A claim is model output over pages we do not control. */}
-        <p className="text-sm text-slate-900">{claim.text}</p>
+        <p className="text-sm leading-6 text-ink">{claim.text}</p>
         <StatusBadge status={claim.status} />
       </div>
 
       {claim.condition ? (
-        <p className="mt-1 text-xs text-slate-600">Holds when: {claim.condition}</p>
+        <p className="mt-1.5 text-xs text-muted">Holds when: {claim.condition}</p>
       ) : null}
 
       {claim.reasoning ? (
-        <p className="mt-2 text-xs leading-5 text-slate-500">{claim.reasoning}</p>
+        <p className="mt-2 text-xs leading-5 text-faint">{claim.reasoning}</p>
       ) : null}
 
       {claim.overgeneralization ? (
-        <p className="mt-2 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">
+        <p className="mt-2.5 rounded-lg bg-verdict-partial/10 px-2.5 py-1.5 text-xs text-verdict-partial">
           Reaches past its evidence: {claim.overgeneralization}
         </p>
       ) : null}
 
       {claim.suggested_revision ? (
-        <p className="mt-2 rounded bg-slate-50 px-2 py-1 text-xs text-slate-700">
+        <p className="mt-2 rounded-lg bg-raised px-2.5 py-1.5 text-xs text-muted">
           Within the evidence: {claim.suggested_revision}
         </p>
       ) : null}
 
-      <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+      <div className="mt-2.5 flex flex-wrap items-center gap-3 text-[11px] text-faint">
         <span className="font-mono">{claim.kind}</span>
         <span>strength {claim.strength.toFixed(2)}</span>
         <span>{claim.confidence} confidence</span>
         {claim.contradicted_by.length ? (
-          <span className="text-violet-700">
+          <span className="text-verdict-conflicting">
             contradicted by {claim.contradicted_by.length} passage
             {claim.contradicted_by.length > 1 ? "s" : ""}
           </span>
@@ -92,10 +92,10 @@ export function Claims({ researchId, ready }: { researchId: string; ready: boole
               <button
                 key={option.key}
                 onClick={() => setFilter(option.key)}
-                className={`rounded px-2 py-0.5 text-xs ${
+                className={`rounded-lg px-2.5 py-1 text-xs transition-colors ${
                   filter === option.key
-                    ? "bg-slate-900 text-white"
-                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                    ? "bg-brand/15 text-brand ring-1 ring-inset ring-brand/30"
+                    : "bg-raised text-muted hover:text-ink"
                 }`}
               >
                 {option.label} {count}
@@ -108,7 +108,7 @@ export function Claims({ researchId, ready }: { researchId: string; ready: boole
       {shown.length === 0 ? (
         <Empty>No claims with this verdict.</Empty>
       ) : (
-        <ul className="divide-y divide-slate-100">
+        <ul className="divide-y divide-line">
           {shown.map((claim) => (
             <Claim key={claim.id} claim={claim} />
           ))}
