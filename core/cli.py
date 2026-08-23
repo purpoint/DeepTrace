@@ -545,6 +545,27 @@ def _jobs(args: argparse.Namespace) -> int:
         return 1
 
 
+def _serve(args: argparse.Namespace) -> int:
+    """Run the API.
+
+    Uvicorn is given the factory rather than an instance, so the application is
+    built inside the server's process. With ``--reload`` that matters: the
+    reloader re-imports the module, and an app constructed at import time would
+    open a second database pool on every code change.
+    """
+    import uvicorn
+
+    uvicorn.run(
+        "apps.api.main:create_app",
+        factory=True,
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_config=None,  # the application configures structured logging itself
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="deeptrace",
@@ -609,6 +630,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Take a single job and exit, rather than running until stopped",
     )
 
+    serve = subcommands.add_parser("serve", help="Run the HTTP API")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument(
+        "--reload", action="store_true", help="Restart on code changes, for development"
+    )
+
     jobs = subcommands.add_parser("jobs", help="Show a job, or the queue's depth")
     jobs.add_argument("job_id", nargs="?", help="A job id. Omit for queue depth.")
     jobs.add_argument("--cancel", action="store_true", help="Ask a running job to stop")
@@ -639,6 +667,8 @@ def main(argv: list[str] | None = None) -> int:
         return _work(args)
     if args.command == "jobs":
         return _jobs(args)
+    if args.command == "serve":
+        return _serve(args)
 
     parser.print_help()
     return 0

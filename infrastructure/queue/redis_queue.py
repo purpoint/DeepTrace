@@ -102,6 +102,10 @@ def _cancel_key(job_id: str) -> str:
     return f"deeptrace:job:{job_id}:cancel"
 
 
+def _research_key(research_id: str) -> str:
+    return f"deeptrace:research:{research_id}"
+
+
 class RedisJobQueue:
     """The queue. One instance per process, holding one connection pool."""
 
@@ -134,6 +138,11 @@ class RedisJobQueue:
         and the reverse ordering makes that impossible rather than unlikely.
         """
         await self._write(job)
+        # An index from research id to job id, written here rather than derived
+        # by scanning later. The API knows a research id and needs the job
+        # behind it, and the alternative -- KEYS over the job namespace --
+        # blocks Redis for the duration and grows with every job ever queued.
+        await self.client.set(_research_key(job.research_id), job.id, ex=JOB_TTL_SECONDS)
         await self.client.lpush(PENDING, job.id)
         log.info("queue.enqueued", job_id=job.id, research_id=job.research_id)
         return job
@@ -309,6 +318,16 @@ class RedisJobQueue:
     async def get(self, job_id: str) -> Job | None:
         raw = await self.client.hgetall(_key(job_id))
         return Job.from_redis(_as_hash(raw)) if raw else None
+
+    async def get_by_research(self, research_id: str) -> Job | None:
+        """The job behind a run, or None once its record has expired.
+
+        Expiry is expected rather than exceptional: the job is the operational
+        record and lives a week, while the research itself is in PostgreSQL and
+        outlives every worker that touched it.
+        """
+        job_id = await self.client.get(_research_key(research_id))
+        return await self.get(_as_text(job_id)) if job_id else None
 
     async def depth(self) -> dict[str, int]:
         """How much work is waiting, running, and set aside."""

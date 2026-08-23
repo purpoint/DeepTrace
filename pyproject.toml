@@ -39,6 +39,8 @@ dependencies = [
     "langgraph>=1.0",         # stateful, checkpointed research workflow
     "langgraph-checkpoint-postgres>=2.0",  # durable checkpoints (brings psycopg3)
     "redis>=5.0",             # job queue and progress fan-out (asyncio client)
+    "fastapi>=0.115",         # HTTP API over the research engine
+    "uvicorn[standard]>=0.32", # ASGI server for the API
 ]
 
 [project.optional-dependencies]

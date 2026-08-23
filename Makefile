@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 .PHONY: help setup install lint format typecheck test test-int test-cov check clean run \
-	db-up db-down db-reset db-revision
+	db-up db-down db-reset db-revision api worker
 
 VENV   := .venv
 PYTHON := $(VENV)/bin/python
@@ -48,6 +48,12 @@ check: lint typecheck test ## Run everything CI runs
 
 run: ## Show resolved configuration
 	$(PYTHON) -m core.cli status
+
+api: ## Run the HTTP API with reload
+	$(PYTHON) -m core.cli serve --reload
+
+worker: ## Run a research worker
+	$(PYTHON) -m core.cli work
 
 db-up: ## Apply all pending migrations
 	$(ALEMBIC) upgrade head

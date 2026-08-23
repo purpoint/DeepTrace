@@ -142,6 +142,17 @@ class Settings(BaseSettings):
     tavily_api_key: str | None = None
     search_timeout_seconds: float = 30.0
 
+    # -- API ---------------------------------------------------------------
+    cors_origins: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Browser origins allowed to call the API. Empty disables CORS "
+            "entirely, which is right for a service with no browser client. "
+            "Listed rather than wildcarded: a wildcard is convenient until "
+            "credentials are involved, and by then it has shipped."
+        ),
+    )
+
     # -- Data stores -------------------------------------------------------
     database_url: str | None = None
     redis_url: str = "redis://localhost:6379/0"
