@@ -16,10 +16,14 @@ export function History() {
 
   return (
     <div className="mx-auto max-w-5xl animate-fade-up px-6 py-10">
-      <Panel title="Research history" subtitle="Every question that has been asked">
+      {/* "Every question that has been asked" was true when there was one
+          history. It is now this account's history and nobody else's, and a
+          subtitle that still claims otherwise is the interface making a
+          promise the API stopped keeping. */}
+      <Panel title="Your research" subtitle="Every question you have asked">
         {history.isLoading ? <Spinner label="Loading…" /> : null}
         {history.error ? <Failure message="Could not load the history." /> : null}
-        {history.data?.length === 0 ? <Empty>Nothing has been researched yet.</Empty> : null}
+        {history.data?.length === 0 ? <Empty>You have not researched anything yet.</Empty> : null}
 
         <ul className="divide-y divide-line">
           {(history.data ?? []).map((run) => (

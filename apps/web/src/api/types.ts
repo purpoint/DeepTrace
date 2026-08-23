@@ -182,3 +182,16 @@ export const TERMINAL_EVENTS: ReadonlySet<string> = new Set([
   "failed",
   "cancelled",
 ]);
+
+/** The signed-in account, as its owner sees it.
+ *
+ *  There is no password field here and there is none on the wire either. The
+ *  API's response model has nowhere to put one, which is the point of it
+ *  having a response model separate from its database row. */
+export interface Account {
+  id: string;
+  email: string;
+  display_name: string | null;
+  created_at: string;
+  last_login_at: string | null;
+}

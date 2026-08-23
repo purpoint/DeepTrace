@@ -13,11 +13,18 @@
  * Reconnection backs off. A server that is down does not become available
  * faster because a browser tab asks it every hundred milliseconds, and a tab
  * left open overnight against a stopped API should not be a load generator.
+ *
+ * Each connection needs its own ticket, fetched immediately before it opens. A
+ * browser cannot attach a header to a WebSocket, so the credential travels in
+ * the URL -- and a ticket is what makes that survivable: thirty seconds long
+ * and destroyed by first use, so the copy left in an access log is worthless.
+ * The consequence is that a reconnect costs one HTTP request before the socket,
+ * which is the right price for not putting a fifteen-minute token in a URL.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { eventsUrl } from "./client";
+import { api, eventsUrl } from "./client";
 import { TERMINAL_EVENTS, type ProgressEvent } from "./types";
 
 const FIRST_RETRY_MS = 500;
@@ -45,11 +52,40 @@ export function useProgress(researchId: string, enabled: boolean): Progress {
   const timer = useRef<number | null>(null);
   const stopped = useRef(false);
 
-  const connect = useCallback(() => {
+  const scheduleRetry = useCallback(() => {
+    if (stopped.current) return;
+    const delay = Math.min(FIRST_RETRY_MS * 2 ** attempt.current, MAX_RETRY_MS);
+    attempt.current += 1;
+    timer.current = window.setTimeout(() => void connectRef.current(), delay);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // A ref, because connect and scheduleRetry call each other and a plain
+  // reference would capture whichever one was defined first -- which is a
+  // reconnect loop that reconnects with stale state, and it only shows up when
+  // a socket actually drops.
+  const connectRef = useRef<() => Promise<void>>(async () => {});
+
+  const connect = useCallback(async () => {
     if (stopped.current) return;
     setState("connecting");
 
-    const ws = new WebSocket(eventsUrl(researchId, lastSequence.current));
+    let ticket: string;
+    try {
+      ticket = (await api.wsTicket()).ticket;
+    } catch {
+      // No ticket, no socket. Treated like any other failed connection: back
+      // off and try again, because the usual cause is a token that is being
+      // refreshed or an API that is restarting, and both resolve on their own.
+      scheduleRetry();
+      return;
+    }
+
+    // The component may have unmounted while the ticket was in flight. Opening
+    // a socket now would leak one that nothing will ever close.
+    if (stopped.current) return;
+
+    const ws = new WebSocket(eventsUrl(researchId, ticket, lastSequence.current));
     socket.current = ws;
 
     ws.onopen = () => {
@@ -93,13 +129,13 @@ export function useProgress(researchId: string, enabled: boolean): Progress {
       }
 
       setState("closed");
-      const delay = Math.min(FIRST_RETRY_MS * 2 ** attempt.current, MAX_RETRY_MS);
-      attempt.current += 1;
-      timer.current = window.setTimeout(connect, delay);
+      scheduleRetry();
     };
 
     ws.onerror = () => ws.close();
   }, [researchId]);
+
+  connectRef.current = connect;
 
   useEffect(() => {
     if (!enabled) return;
@@ -109,7 +145,7 @@ export function useProgress(researchId: string, enabled: boolean): Progress {
     attempt.current = 0;
     setEvents([]);
     setFinished(false);
-    connect();
+    void connect();
 
     return () => {
       // Torn down on unmount, always. A socket left open by a component that

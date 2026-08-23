@@ -22,5 +22,12 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
+    environmentOptions: {
+      // jsdom refuses localStorage on an opaque origin, and the default
+      // document URL is one. Without a real origin, window.localStorage exists
+      // but has no methods -- which the session module's try/catch quietly
+      // swallows, so the tests would pass while testing nothing.
+      jsdom: { url: "http://localhost:5173" },
+    },
   },
 });

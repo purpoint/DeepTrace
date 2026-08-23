@@ -113,7 +113,7 @@ export function Ask() {
         <button
           type="submit"
           disabled={question.trim().length < 10 || submit.isPending || !acceptingWork}
-          className="group inline-flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-medium text-canvas shadow-sm transition-all hover:brightness-110 hover:shadow-brand/20 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:brightness-100"
+          className="group inline-flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-medium text-canvas shadow-sm transition-all hover:brightness-110 hover:shadow-brand/20 disabled:cursor-not-allowed disabled:bg-raised disabled:text-faint disabled:shadow-none disabled:hover:brightness-100"
         >
           {submit.isPending ? "Starting…" : "Research this"}
           <span className="transition-transform group-hover:translate-x-0.5">→</span>

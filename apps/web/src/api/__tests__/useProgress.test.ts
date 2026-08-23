@@ -5,11 +5,17 @@
  * reconnect can lose nothing -- but only if the client tracks what it last saw
  * and asks for the rest. That bookkeeping is invisible in development, where
  * sockets do not drop, so it is worth pinning here.
+ *
+ * The ticket call is stubbed rather than the whole client. A socket cannot be
+ * opened without one, so the tests would otherwise be testing fetch -- but
+ * stubbing the module wholesale would also stub `eventsUrl`, which is what
+ * carries the `after` value these tests assert on.
  */
 
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { api } from "../client";
 import { useProgress } from "../useProgress";
 import type { ProgressEvent } from "../types";
 
@@ -60,15 +66,23 @@ const event = (sequence: number, kind = "stage"): Partial<ProgressEvent> => ({
   at: new Date().toISOString(),
 });
 
+let tickets = 0;
+
 beforeEach(() => {
   FakeSocket.opened = [];
   FakeSocket.live = [];
   FakeSocket.opensSuccessfully = true;
+  tickets = 0;
+  vi.spyOn(api, "wsTicket").mockImplementation(async () => {
+    tickets += 1;
+    return { ticket: `ticket-${tickets}`, expires_in: 30 };
+  });
   vi.stubGlobal("WebSocket", FakeSocket);
   vi.stubGlobal("location", { protocol: "http:", host: "localhost:5173" });
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -240,5 +254,44 @@ describe("useProgress", () => {
     renderHook(() => useProgress("res_1", false));
 
     expect(FakeSocket.opened).toHaveLength(0);
+  });
+
+  it("carries a ticket", async () => {
+    renderHook(() => useProgress("res_1", true));
+
+    await waitFor(() => expect(FakeSocket.opened).toHaveLength(1));
+    expect(FakeSocket.opened[0]).toContain("ticket=ticket-1");
+  });
+
+  it("gets a fresh ticket for every connection", async () => {
+    // A ticket is destroyed by the first connection that uses it. Reusing one
+    // on reconnect would be refused, and the client would back off forever
+    // against a server that was working perfectly.
+    vi.useFakeTimers();
+    renderHook(() => useProgress("res_1", true));
+    await vi.waitFor(() => expect(FakeSocket.live).toHaveLength(1));
+
+    act(() => FakeSocket.live[0]!.drop());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+
+    await vi.waitFor(() => expect(FakeSocket.opened).toHaveLength(2));
+    expect(FakeSocket.opened[1]).toContain("ticket-2");
+  });
+
+  it("retries rather than giving up when a ticket cannot be obtained", async () => {
+    // The usual cause is a token being refreshed or an API restarting, and
+    // both resolve on their own. Treating it as fatal would leave a run that is
+    // still going with a progress panel that never moves again.
+    vi.useFakeTimers();
+    vi.mocked(api.wsTicket).mockRejectedValueOnce(new Error("no ticket"));
+
+    renderHook(() => useProgress("res_1", true));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+
+    await vi.waitFor(() => expect(FakeSocket.opened).toHaveLength(1));
   });
 });
