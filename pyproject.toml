@@ -38,6 +38,7 @@ dependencies = [
     "alembic>=1.13",          # schema migrations
     "langgraph>=1.0",         # stateful, checkpointed research workflow
     "langgraph-checkpoint-postgres>=2.0",  # durable checkpoints (brings psycopg3)
+    "redis>=5.0",             # job queue and progress fan-out (asyncio client)
 ]
 
 [project.optional-dependencies]

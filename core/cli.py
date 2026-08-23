@@ -28,6 +28,7 @@ from core.models.report import render_markdown
 
 if TYPE_CHECKING:
     from core.models.run import ResearchRun
+    from infrastructure.queue.redis_queue import RedisJobQueue
 
 __version__ = "0.1.0"
 
@@ -423,6 +424,127 @@ def _print_run(
     return 0
 
 
+@asynccontextmanager
+async def _queue() -> AsyncIterator[RedisJobQueue]:
+    """Open the job queue, and close its connection pool afterwards.
+
+    Imported inside the function like the database is: a CLI that resolves
+    Redis at import time cannot run ``status`` on a machine without it, and
+    diagnosing a broken install is exactly when that matters.
+    """
+    from infrastructure.queue.redis_queue import RedisJobQueue
+
+    queue = RedisJobQueue.from_settings()
+    try:
+        yield queue
+    finally:
+        await queue.close()
+
+
+def _submit(args: argparse.Namespace) -> int:
+    """Queue a job and return. The work happens in a worker."""
+    from infrastructure.queue.job import Job
+
+    async def execute() -> Job:
+        async with _queue() as queue:
+            return await queue.enqueue(
+                Job(
+                    question=args.question,
+                    depth=ResearchDepth(args.depth),
+                    max_tasks=args.max_tasks,
+                )
+            )
+
+    try:
+        job = asyncio.run(execute())
+    except Exception as exc:
+        print(f"could not reach the queue: {type(exc).__name__}: {exc}")
+        return 1
+
+    print(f"queued {job.id}")
+    print(f"   research id  {job.research_id}")
+    print(f"   depth        {job.depth.value}")
+    print()
+    print("Run a worker to execute it:  deeptrace work")
+    print(f"Check on it:                 deeptrace jobs {job.id}")
+    return 0
+
+
+def _work(args: argparse.Namespace) -> int:
+    """Run a worker until it is stopped."""
+    from apps.worker.runner import Worker, install_signal_handlers
+    from infrastructure.db.checkpointer import checkpointer_scope
+
+    async def execute() -> None:
+        async with _queue() as queue, checkpointer_scope() as saver:
+            worker = Worker(queue, checkpointer=saver)
+            install_signal_handlers(worker)
+
+            if args.once:
+                # Reclaim first. A single-shot worker that only reserved could
+                # never pick up a job abandoned by a crashed one -- which is
+                # the case this whole layer exists for.
+                reclaimed = await queue.reclaim_stalled()
+                if reclaimed:
+                    print(f"reclaimed {len(reclaimed)} abandoned job(s)")
+
+                job = await queue.reserve(worker.name, timeout=5)
+                if job is None:
+                    print("no job waiting")
+                    return
+                await worker.execute(job)
+                return
+
+            await worker.run_forever()
+
+    try:
+        asyncio.run(execute())
+    except KeyboardInterrupt:  # pragma: no cover - a second interrupt
+        print("stopped")
+    except Exception as exc:
+        print(f"worker could not start: {type(exc).__name__}: {exc}")
+        return 1
+    return 0
+
+
+def _jobs(args: argparse.Namespace) -> int:
+    """Show one job, the queue's depth, or ask a job to stop."""
+
+    async def execute() -> int:
+        async with _queue() as queue:
+            if args.job_id is None:
+                depth = await queue.depth()
+                print(f"pending    {depth['pending']}")
+                print(f"processing {depth['processing']}")
+                print(f"dead       {depth['dead']}")
+                return 0
+
+            if args.cancel:
+                if await queue.request_cancel(args.job_id):
+                    print(f"cancellation requested for {args.job_id}")
+                    return 0
+                print(f"{args.job_id} is not running, or does not exist")
+                return 1
+
+            job = await queue.get(args.job_id)
+            if job is None:
+                print(f"no job {args.job_id}")
+                return 1
+
+            print(job.summary())
+            print(f"   research id  {job.research_id}")
+            print(f"   worker       {job.worker or '-'}")
+            if job.error:
+                print(_wrap(f"error: {job.error}", indent="   "))
+            return 0
+
+    try:
+        return asyncio.run(execute())
+    except Exception as exc:
+        print(f"could not reach the queue: {type(exc).__name__}: {exc}")
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="deeptrace",
@@ -470,6 +592,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Persist the run to PostgreSQL once it finishes",
     )
+
+    submit = subcommands.add_parser("submit", help="Queue a research job for a worker to run")
+    submit.add_argument("question", help="The research question")
+    submit.add_argument(
+        "--depth",
+        choices=[d.value for d in ResearchDepth],
+        default=ResearchDepth.STANDARD.value,
+    )
+    submit.add_argument("--max-tasks", type=int, default=None, metavar="N")
+
+    work = subcommands.add_parser("work", help="Run a worker that consumes research jobs")
+    work.add_argument(
+        "--once",
+        action="store_true",
+        help="Take a single job and exit, rather than running until stopped",
+    )
+
+    jobs = subcommands.add_parser("jobs", help="Show a job, or the queue's depth")
+    jobs.add_argument("job_id", nargs="?", help="A job id. Omit for queue depth.")
+    jobs.add_argument("--cancel", action="store_true", help="Ask a running job to stop")
+
     return parser
 
 
@@ -490,6 +633,12 @@ def main(argv: list[str] | None = None) -> int:
         return _run_research(args)
     if args.command == "resume":
         return _resume_research(args)
+    if args.command == "submit":
+        return _submit(args)
+    if args.command == "work":
+        return _work(args)
+    if args.command == "jobs":
+        return _jobs(args)
 
     parser.print_help()
     return 0
