@@ -195,3 +195,47 @@ export interface Account {
   created_at: string;
   last_login_at: string | null;
 }
+
+/** What one agent spent on a run.
+ *
+ *  `cost_usd` is null when any call in the group had no recorded price. The API
+ *  reports no cost rather than a partial sum, because a sum over unpriced calls
+ *  looks authoritative and understates. */
+export interface AgentSpend {
+  agent: string;
+  model: string;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  latency_ms: number;
+  cost_usd: number | null;
+  unpriced: number;
+  failed: number;
+}
+
+/** What one tool cost in time. Tools have no token cost, and on a rate-limited
+ *  provider the wall clock is dominated by waiting rather than spending. */
+export interface ToolSpend {
+  tool: string;
+  calls: number;
+  latency_ms: number;
+  failed: number;
+}
+
+export interface CostView {
+  research_id: string;
+  total_cost_usd: number | null;
+  /** Whether every model call in this run had a recorded price. A client that
+   *  shows a figure without reading this is showing a number the API did not
+   *  stand behind. */
+  complete: boolean;
+  unpriced_calls: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  model_latency_ms: number;
+  tool_latency_ms: number;
+  by_agent: AgentSpend[];
+  by_tool: ToolSpend[];
+  /** Models whose recorded price is past its published end date. */
+  stale_prices: string[];
+}

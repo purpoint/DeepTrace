@@ -27,6 +27,7 @@ import {
 import type {
   Account,
   CancelResponse,
+  CostView,
   ClaimView,
   Depth,
   EvidenceView,
@@ -215,6 +216,7 @@ export const api = {
   evidence: (id: string) => request<EvidenceView[]>(`/research/${id}/evidence`),
   sources: (id: string) => request<SourceView[]>(`/research/${id}/sources`),
   trace: (id: string) => request<TraceView>(`/research/${id}/trace`),
+  cost: (id: string) => request<CostView>(`/research/${id}/cost`),
 
   cancel: (id: string) =>
     request<CancelResponse>(`/research/${id}/cancel`, { method: "POST" }),

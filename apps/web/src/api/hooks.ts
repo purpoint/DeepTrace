@@ -29,6 +29,7 @@ export const keys = {
   evidence: (id: string) => ["research", id, "evidence"] as const,
   sources: (id: string) => ["research", id, "sources"] as const,
   trace: (id: string) => ["research", id, "trace"] as const,
+  cost: (id: string) => ["research", id, "cost"] as const,
 };
 
 export function useHealth() {
@@ -90,6 +91,10 @@ export function useSources(id: string, ready: boolean) {
 
 export function useTrace(id: string, ready: boolean) {
   return useQuery(finishedResource(keys.trace(id), () => api.trace(id), ready));
+}
+
+export function useCost(id: string, ready: boolean) {
+  return useQuery(finishedResource(keys.cost(id), () => api.cost(id), ready));
 }
 
 export function useSubmit() {

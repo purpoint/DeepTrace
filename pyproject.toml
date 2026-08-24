@@ -45,6 +45,9 @@ dependencies = [
     "pyjwt>=2.9",             # signs and verifies access and refresh tokens
     "argon2-cffi>=23.1",      # password hashing (infrastructure/auth/passwords.py)
     "email-validator>=2.2",   # what pydantic's EmailStr defers to
+    "opentelemetry-api>=1.27",   # span interface, no-op unless an exporter is configured
+    "opentelemetry-sdk>=1.27",   # the implementation, installed only when tracing is on
+    "opentelemetry-exporter-otlp-proto-http>=1.27",  # spans to a collector
 ]
 
 [project.optional-dependencies]

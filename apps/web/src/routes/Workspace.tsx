@@ -23,9 +23,10 @@ import { Evidence } from "./Evidence";
 import { ProgressView } from "./Progress";
 import { Report } from "./Report";
 import { Sources } from "./Sources";
+import { Cost } from "./Cost";
 import { Trace } from "./Trace";
 
-type Tab = "progress" | "report" | "claims" | "evidence" | "sources" | "trace";
+type Tab = "progress" | "report" | "claims" | "evidence" | "sources" | "trace" | "cost";
 
 const FINISHED = new Set(["completed", "failed", "cancelled", "partial"]);
 
@@ -75,6 +76,7 @@ export function Workspace() {
     { key: "evidence", label: "Evidence", count: detail.data.evidence },
     { key: "sources", label: "Sources", count: detail.data.sources },
     { key: "trace", label: "Trace" },
+    { key: "cost", label: "Cost" },
   ];
 
   return (
@@ -154,6 +156,7 @@ export function Workspace() {
           <Sources researchId={researchId} ready={detail.data.sources > 0} />
         ) : null}
         {tab === "trace" ? <Trace researchId={researchId} ready={finished} /> : null}
+        {tab === "cost" ? <Cost researchId={researchId} ready={finished} /> : null}
       </div>
     </div>
   );
