@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from core.logging import get_logger
+from core.redaction import redact_mapping, redact_text
 
 log = get_logger(__name__)
 
@@ -44,6 +45,13 @@ class AgentRun:
     run, it must be possible to say where it failed, why, how long it took,
     which model and prompt version were used, how many times it retried, and
     what it cost. Every field below exists to answer part of that.
+
+    Credentials are stripped from ``error_message`` here, at construction,
+    rather than by the thing that writes it down. There are five recorders --
+    null, in-memory, JSONL, multi, and PostgreSQL -- and redacting in each is
+    exactly the "every call site remembers" pattern that the logging processor
+    exists to avoid. Doing it once, in the record itself, means a recorder
+    added tomorrow inherits it and cannot opt out.
     """
 
     agent: str
@@ -78,6 +86,16 @@ class AgentRun:
     completed_at: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        """Strip credentials from the free-text field.
+
+        Provider errors quote the request that failed, and a request carries an
+        Authorization header. This is the field where a key actually leaks --
+        not the ones anybody thought to guard.
+        """
+        object.__setattr__(self, "error_message", redact_text(self.error_message))
+        object.__setattr__(self, "metadata", redact_mapping(self.metadata))
+
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
@@ -95,6 +113,11 @@ class ToolCall:
     recorded whether it succeeded or not. A source that could not be fetched is
     part of the research trace: it explains a gap in the evidence instead of
     leaving one unaccounted for.
+
+    Being the outside contact is also why this record is the riskiest one to
+    store. ``arguments`` holds a URL or a search query, and both can carry a
+    credential -- a signed URL, or a key someone pasted into a question. So both
+    it and ``error_message`` are redacted at construction.
     """
 
     tool: str
@@ -119,6 +142,11 @@ class ToolCall:
     started_at: datetime = field(default_factory=_utc_now)
     completed_at: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "arguments", redact_mapping(self.arguments))
+        object.__setattr__(self, "metadata", redact_mapping(self.metadata))
+        object.__setattr__(self, "error_message", redact_text(self.error_message))
 
     @property
     def succeeded(self) -> bool:

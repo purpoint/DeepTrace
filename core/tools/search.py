@@ -34,6 +34,7 @@ from core.tools.base import (
     ToolTimeoutError,
     ToolUnavailableError,
 )
+from core.tools.sanitize import sanitize_untrusted
 from core.tools.url_guard import URLValidationError, validate_url
 
 log = get_logger(__name__)
@@ -45,6 +46,12 @@ class SearchResult:
 
     ``content`` is whatever the provider extracted. It is untrusted text and
     must be wrapped before any model sees it.
+
+    It is also sanitized here, at construction, rather than by the Tavily
+    adapter that produces it. A provider returns text pulled out of an arbitrary
+    web page, so every provider is an entrance for the same danger -- and a
+    control applied at one of two entrances is not a control. Doing it in the
+    record means the next provider inherits it without knowing it exists.
     """
 
     url: str
@@ -53,6 +60,10 @@ class SearchResult:
     published_at: datetime | None = None
     provider_score: float | None = None
     provider: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "title", sanitize_untrusted(self.title))
+        object.__setattr__(self, "content", sanitize_untrusted(self.content))
 
     @property
     def domain(self) -> str:

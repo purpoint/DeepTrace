@@ -35,6 +35,7 @@ from core.tools.base import (
     ToolTimeoutError,
     ToolUnavailableError,
 )
+from core.tools.sanitize import sanitize_untrusted
 from core.tools.url_guard import (
     MAX_REDIRECTS,
     MAX_RESPONSE_BYTES,
@@ -131,6 +132,12 @@ def extract_text(html: str) -> tuple[str, str]:
     Deterministic and model-free. Prefers a semantic content container when the
     page provides one, because that removes sidebars and related-article lists
     that would otherwise be extracted as though they were the article.
+
+    The result is sanitized before it is returned. Parsing already removes the
+    markup, but it does not remove what survives *as text*: a page's rendered
+    characters can still include bidirectional overrides, which reorder how a
+    quotation displays without changing what was verified. That is invisible to
+    every check in this system and visible to every reader of the report.
     """
     tree = HTMLParser(html)
 
@@ -155,7 +162,7 @@ def extract_text(html: str) -> tuple[str, str]:
     body = container or tree.body
     text = _clean(body.text(separator="\n", deep=True)) if body is not None else ""
 
-    return title, text
+    return sanitize_untrusted(title), sanitize_untrusted(text)
 
 
 async def fetch_url(

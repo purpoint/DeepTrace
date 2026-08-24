@@ -575,3 +575,73 @@ class TestSelectionForExtraction:
         assert report.duplicates_collapsed == 1
         assert report.over_budget == 1
         assert "not extracted" in report.summary()
+
+
+class TestInvisibleCharacters:
+    """Quotations that differ only by characters nobody can see.
+
+    This class exists because of a live bug. Only the zero-width space and the
+    byte order mark were folded away, so a page using soft hyphens -- ordinary
+    hyphenation hints that real sites emit constantly -- produced quotations
+    scored `not_found`, and the evidence was discarded.
+
+    The failure was invisible in the worst way: a rejected quotation is exactly
+    what the anti-fabrication check is supposed to produce, so the system
+    throwing away genuine evidence looked identical to the system working.
+    """
+
+    def test_a_soft_hyphenated_page_still_verifies(self) -> None:
+        page = "Kafka guaran­tees ordering within a par­tition at all times."
+
+        result = verify_quotation("Kafka guarantees ordering within a partition", page)
+
+        assert result.status.is_quotable
+        assert result.similarity == pytest.approx(1.0)
+
+    @pytest.mark.parametrize(
+        ("name", "character"),
+        [
+            ("soft hyphen", "­"),
+            ("zero-width space", "​"),
+            ("zero-width non-joiner", "‌"),
+            ("zero-width joiner", "‍"),
+            ("word joiner", "⁠"),
+            ("byte order mark", "﻿"),
+            ("left-to-right mark", "‎"),
+            ("right-to-left override", "‮"),
+            ("pop directional formatting", "‬"),
+            ("first strong isolate", "⁨"),
+        ],
+    )
+    def test_no_invisible_character_can_reject_a_real_quote(
+        self, name: str, character: str
+    ) -> None:
+        """Every one of these renders as nothing. A quotation differing from its
+        source only by one is the same sentence to every reader."""
+        page = f"Records are{character} appended in the{character} order they are sent."
+
+        result = verify_quotation("Records are appended in the order they are sent.", page)
+
+        assert result.status.is_quotable, f"{name} rejected a genuine quotation"
+
+    def test_a_fabricated_quote_is_still_rejected(self) -> None:
+        """The control that must not have been loosened. Folding invisible
+        characters makes verification more forgiving, and the whole point of
+        this check is that it is not forgiving about content."""
+        result = verify_quotation(
+            "Kafka guarantees global ordering across every partition.",
+            "Records are appended in the order they are sent.",
+        )
+
+        assert not result.status.is_quotable
+        assert result.status is QuoteStatus.NOT_FOUND
+
+    def test_case_is_still_not_folded(self) -> None:
+        """The boundary of "differences that do not change meaning". A reader
+        sees case, so a quotation that changes it is not verbatim."""
+        result = verify_quotation(
+            "RECORDS ARE APPENDED IN THE ORDER THEY ARE SENT.",
+            "Records are appended in the order they are sent.",
+        )
+
+        assert result.status is not QuoteStatus.VERBATIM

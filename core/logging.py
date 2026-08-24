@@ -19,82 +19,20 @@ every call site to remember.
 from __future__ import annotations
 
 import logging
-import re
 import sys
 from typing import Any
 
 import structlog
 from structlog.types import EventDict, Processor
 
+from core import redaction
 from core.config import Settings, get_settings
 
-REDACTED = "[REDACTED]"
-
-# Field names whose values must never be logged, matched case-insensitively as
-# substrings so `openai_api_key` and `X-Api-Key` are both caught.
-_SENSITIVE_KEY = re.compile(
-    r"api[_-]?key|secret|token|password|passwd|authorization|credential|bearer|jwt|cookie",
-    re.IGNORECASE,
-)
-
-# Fields that contain the substring "token" but are usage metrics, not secrets.
-# Without this exemption the pattern above redacts token counts, which would
-# silently destroy the cost tracking that observability depends on. Checked
-# before _SENSITIVE_KEY, so the allowlist wins.
-_METRIC_KEYS = frozenset(
-    {
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "prompt_tokens",
-        "completion_tokens",
-        "cached_tokens",
-        "reasoning_tokens",
-        "max_tokens",
-        "max_output_tokens",
-        "token_count",
-        "token_limit",
-        "tokens",
-        "tokens_per_second",
-    }
-)
-
-# Value shapes that are secrets regardless of the field they appear under. These
-# catch credentials embedded in error messages, URLs, and retrieved content,
-# which is where accidental leaks actually happen.
-_SECRET_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),  # OpenAI
-    re.compile(r"sk-ant-[A-Za-z0-9_\-]{16,}"),  # Anthropic
-    re.compile(r"tvly-[A-Za-z0-9_\-]{16,}"),  # Tavily
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{16,}"),  # GitHub
-    re.compile(r"AIza[A-Za-z0-9_\-]{20,}"),  # Google
-    re.compile(r"(?i)\b(?:postgres(?:ql)?|redis|amqp)://[^:\s]+:[^@\s]+@"),  # URL credentials
-)
-
-
-def _redact_value(value: Any) -> Any:
-    """Recursively strip secret-shaped substrings from a logged value."""
-    if isinstance(value, str):
-        for pattern in _SECRET_VALUE_PATTERNS:
-            value = pattern.sub(REDACTED, value)
-        return value
-    if isinstance(value, dict):
-        return _redact_mapping(value)
-    if isinstance(value, (list, tuple)):
-        return type(value)(_redact_value(item) for item in value)
-    return value
-
-
-def _redact_mapping(mapping: dict[Any, Any]) -> dict[Any, Any]:
-    """Redact by key name first, then scan surviving values for secret shapes."""
-    result: dict[Any, Any] = {}
-    for key, value in mapping.items():
-        is_metric = isinstance(key, str) and key.lower() in _METRIC_KEYS
-        if not is_metric and isinstance(key, str) and _SENSITIVE_KEY.search(key):
-            result[key] = REDACTED
-        else:
-            result[key] = _redact_value(value)
-    return result
+# The patterns live in core.redaction, because logs are no longer the only
+# thing that records a run: the persisted trace carries the same two dangerous
+# fields, and two copies of "what a secret looks like" is one copy that falls
+# behind.
+REDACTED = redaction.REDACTED
 
 
 def redact_secrets(_logger: Any, _method: str, event_dict: EventDict) -> EventDict:
@@ -104,7 +42,7 @@ def redact_secrets(_logger: Any, _method: str, event_dict: EventDict) -> EventDi
     matters is the one nobody remembered to guard -- an exception string
     containing a request URL, or a config dump during debugging.
     """
-    return _redact_mapping(dict(event_dict))
+    return redaction.redact_mapping(dict(event_dict))
 
 
 def _drop_color_message(_logger: Any, _method: str, event_dict: EventDict) -> EventDict:

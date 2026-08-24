@@ -59,10 +59,53 @@ _LOOKALIKES = {
     "\u2015": "-",  # horizontal bar
     "\u2212": "-",  # minus sign
     "\u00a0": " ",  # non-breaking space
-    "\u200b": "",  # zero-width space
-    "\ufeff": "",  # byte order mark
     "\u2026": "...",  # ellipsis
 }
+
+# Characters a reader cannot see, folded away before comparison.
+#
+# This started as a bug. Only ZWSP and the byte order mark were handled, so a
+# page using soft hyphens -- ordinary hyphenation hints, which real sites emit
+# by the thousand -- produced quotations that failed verification outright.
+# `Kafka guaran-tees ordering` and `Kafka guarantees ordering` are the same
+# sentence to every human who reads them and different token streams to this
+# comparison, so genuine evidence was scored `not_found` and thrown away. The
+# rejection looked exactly like the anti-fabrication check working correctly,
+# which is why it survived so long.
+#
+# The rule is what a reader sees. If removing a character cannot change the
+# sentence anyone reads, a quotation differing only by it is still verbatim.
+_INVISIBLE = {
+    "\u00ad": "",  # soft hyphen -- a hyphenation hint, not content
+    "\u200b": "",  # zero-width space
+    "\u200c": "",  # zero-width non-joiner
+    "\u200d": "",  # zero-width joiner
+    "\u2060": "",  # word joiner
+    "\ufeff": "",  # byte order mark / zero-width no-break space
+    "\u200e": "",  # left-to-right mark
+    "\u200f": "",  # right-to-left mark
+    "\u202a": "",  # left-to-right embedding
+    "\u202b": "",  # right-to-left embedding
+    "\u202c": "",  # pop directional formatting
+    "\u202d": "",  # left-to-right override
+    "\u202e": "",  # right-to-left override
+    "\u2066": "",  # left-to-right isolate
+    "\u2067": "",  # right-to-left isolate
+    "\u2068": "",  # first strong isolate
+    "\u2069": "",  # pop directional isolate
+}
+"""Folded for *comparison* only, which is a narrower job than sanitizing.
+
+`core.tools.sanitize` strips the directional controls from stored text, because
+they can only change how a sentence displays and never what it says. It leaves
+the zero-width joiners alone, because those are load-bearing in Persian, Hindi
+and most emoji -- deleting them from stored evidence would corrupt it.
+
+Here the question is different: not "is this safe to keep" but "are these two
+strings the same sentence". A joiner that survives sanitization must still be
+folded away before two quotations are compared, or a page that renders
+identically to another compares as a different passage.
+"""
 
 PARAPHRASE_THRESHOLD = 0.75
 """Token overlap above which a passage counts as a paraphrase rather than absent.
@@ -114,11 +157,17 @@ class SupportStrength(StrEnum):
 def normalise(text: str) -> str:
     """Collapse the differences that do not change meaning.
 
-    Unicode compatibility normalisation, typographic lookalikes folded to ASCII,
-    whitespace collapsed. Case is preserved, because a quotation that changes
-    case is not verbatim.
+    Unicode compatibility normalisation, invisible characters dropped,
+    typographic lookalikes folded to ASCII, whitespace collapsed. Case is
+    preserved, because a quotation that changes case is not verbatim.
+
+    Every fold here has to pass one test: could removing it change the sentence
+    a person reads? A curly apostrophe and a straight one read identically, so
+    they fold. Case does not, so it stays.
     """
     text = unicodedata.normalize("NFKC", text)
+    for original, replacement in _INVISIBLE.items():
+        text = text.replace(original, replacement)
     for original, replacement in _LOOKALIKES.items():
         text = text.replace(original, replacement)
     return _WHITESPACE.sub(" ", text).strip()
