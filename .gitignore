@@ -93,3 +93,6 @@ docs/
 # ---------------------------------------------------------------------------
 # Migration scripts are tracked; the generated README from `alembic init` is not.
 infrastructure/db/migrations/README
+
+# Benchmark output. Regenerable, and the numbers live in EVALUATION.md.
+data/evaluation/
