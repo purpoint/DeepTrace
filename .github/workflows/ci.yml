@@ -1,0 +1,223 @@
+# What has to be true before a change lands.
+#
+# Four jobs, split by what they need rather than by what they are. The fast one
+# needs nothing and runs in under a minute; the integration job needs a database
+# and a queue; the client job needs Node; the image job needs a Docker daemon.
+# Splitting them this way means a lint error is reported in forty seconds
+# instead of after a five-minute suite, and one slow job cannot hide a fast
+# failure behind it.
+#
+# The image job matters more here than it usually would. The container files
+# were written on a machine with no Docker daemon, so this is the first place
+# they are actually built -- CI is not re-checking work that was verified
+# locally, it is doing the verification for the first time.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# The default token is read-only. Nothing here publishes, comments, or pushes,
+# so nothing here needs permission to.
+permissions:
+  contents: read
+
+concurrency:
+  # A second push supersedes the first. Without this, a busy morning queues runs
+  # that are testing commits nobody is waiting on any more.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  check:
+    name: lint, types, unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Formatting
+        # --check rather than rewriting. CI that formats code is CI that pushes,
+        # and a job with write access is a much larger thing than a job with a
+        # complaint.
+        run: ruff format --check .
+
+      - name: Types
+        run: mypy core apps infrastructure
+
+      - name: Unit tests
+        # No database, no network, no paid API calls. The `llm` marker is
+        # deselected here and everywhere else by default -- a CI run that spends
+        # money on every push is one that gets switched off.
+        run: pytest -m "not llm and not integration" -q
+
+  integration:
+    name: integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: deeptrace_test
+        ports:
+          - 5432:5432
+        # Without this, the job starts before PostgreSQL accepts connections and
+        # the first test fails on a race rather than on anything real -- the
+        # same trap the compose file avoids with service_healthy.
+        options: >-
+          --health-cmd "pg_isready -U postgres -d deeptrace_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/deeptrace_test
+      TEST_REDIS_URL: redis://localhost:6379/15
+      # Placeholders. No integration test makes a provider call -- they exercise
+      # PostgreSQL, Redis and the HTTP surface -- but the settings object wants
+      # something present, and a real key in CI would be a real key in a log.
+      GOOGLE_API_KEY: ci-not-a-real-key
+      TAVILY_API_KEY: ci-not-a-real-key
+      JWT_SECRET: a-ci-signing-key-long-enough-to-pass-validation
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Integration tests
+        # The suite migrates the database itself, downgrading to base and back
+        # up, so every run also exercises the reverse migration. A downgrade
+        # that is never run is a downgrade that does not work.
+        run: pytest -m integration -q
+
+  web:
+    name: browser client
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install
+        # `ci` rather than `install`: it installs exactly the lockfile and fails
+        # if package.json disagrees, so CI cannot quietly resolve a different
+        # dependency tree than a developer has.
+        run: npm ci
+
+      - name: Types
+        run: npx tsc --noEmit
+
+      - name: Tests
+        run: npx vitest run
+
+      - name: Build
+        run: npm run build
+
+  images:
+    name: container images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Compose file is valid
+        # `config` resolves the file the way the runtime will, which catches
+        # more than a YAML parse: an unknown key, a bad depends_on condition, an
+        # interpolation that cannot be satisfied.
+        env:
+          POSTGRES_PASSWORD: ci-placeholder
+          JWT_SECRET: a-ci-signing-key-long-enough-to-pass-validation
+          GOOGLE_API_KEY: ci-not-a-real-key
+          TAVILY_API_KEY: ci-not-a-real-key
+        run: docker compose config --quiet
+
+      - name: Build the application image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Never pushed. This job proves the image builds; publishing it is a
+          # deployment decision and needs credentials this workflow does not
+          # have and should not be given.
+          push: false
+          load: true
+          tags: deeptrace:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build the client image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/web
+          push: false
+          load: true
+          tags: deeptrace-web:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: The image can actually run the commands compose asks of it
+        # A built image is not a working one. These are the three entrypoints
+        # the stack uses, and an image that builds but cannot run them fails at
+        # deploy time instead of here.
+        run: |
+          docker run --rm deeptrace:ci python -m core.cli --version
+          docker run --rm deeptrace:ci python -m core.cli status
+          docker run --rm deeptrace:ci alembic --help > /dev/null
+
+      - name: The image does not run as root
+        run: |
+          user=$(docker run --rm deeptrace:ci id -un)
+          echo "image runs as: $user"
+          test "$user" != "root"

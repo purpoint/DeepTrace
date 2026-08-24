@@ -25,8 +25,9 @@ setup: ## Create the virtualenv, install dependencies, and write .env
 install: ## Reinstall dependencies into an existing virtualenv
 	$(PIP) install -e ".[dev]" --quiet
 
-lint: ## Run ruff
+lint: ## Run ruff, including the formatting check CI enforces
 	$(RUFF) check .
+	$(RUFF) format --check .
 
 format: ## Format code and fix what ruff can fix automatically
 	$(RUFF) format .

@@ -81,9 +81,7 @@ class TestStartupOrdering:
         assert all("condition" in value for value in depends.values())
 
     @pytest.mark.parametrize("service", ["api", "worker"])
-    def test_the_schema_exists_before_anything_uses_it(
-        self, compose: dict, service: str
-    ) -> None:
+    def test_the_schema_exists_before_anything_uses_it(self, compose: dict, service: str) -> None:
         depends = compose["services"][service]["depends_on"]
 
         assert depends["migrate"]["condition"] == "service_completed_successfully"
@@ -96,9 +94,7 @@ class TestExposure:
         """The database, Redis and the API are reachable on the compose network
         and nowhere else, so the API cannot be called around the proxy and the
         database is not on the host's interface."""
-        published = {
-            name for name, service in compose["services"].items() if service.get("ports")
-        }
+        published = {name for name, service in compose["services"].items() if service.get("ports")}
 
         assert published == {"web"}
 
@@ -127,9 +123,7 @@ class TestNamesThatMustMatchSomethingReal:
             environment = service.get("environment") or {}
             if not isinstance(environment, dict):
                 continue
-            unknown = [
-                key for key in environment if key not in known and key not in CONTAINER_ONLY
-            ]
+            unknown = [key for key in environment if key not in known and key not in CONTAINER_ONLY]
             assert not unknown, f"{name} sets {unknown}, which Settings does not read"
 
     def test_every_copied_path_exists(self) -> None:
@@ -176,3 +170,88 @@ class TestTheProxy:
     def test_client_routes_fall_back_to_the_app(self) -> None:
         """Reloading /research/res_abc is a client route, not a missing file."""
         assert "try_files $uri $uri/ /index.html" in (ROOT / "apps/web/nginx.conf").read_text()
+
+
+class TestTheWorkflow:
+    """Checks on CI that do not need a CI runner.
+
+    A workflow cannot be executed here, but the parts that break are checkable:
+    that it parses, that it does not need write access, and that the commands it
+    runs are commands this repository actually has. The last one is the reason
+    this class exists -- a workflow referencing a make target that was renamed
+    fails on the first push, which is the worst possible time to find out.
+    """
+
+    @pytest.fixture(scope="class")
+    def workflow(self) -> dict:
+        return yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+
+    def test_it_parses(self, workflow: dict) -> None:
+        assert isinstance(workflow, dict)
+
+    def test_it_has_the_four_jobs(self, workflow: dict) -> None:
+        assert set(workflow["jobs"]) == {"check", "integration", "web", "images"}
+
+    def test_it_only_asks_for_read_access(self, workflow: dict) -> None:
+        """Nothing here publishes, comments, or pushes. A job with write access
+        is a much larger thing than a job with a complaint, and the default
+        token is generous unless told otherwise."""
+        assert workflow["permissions"] == {"contents": "read"}
+
+    def test_superseded_runs_are_cancelled(self, workflow: dict) -> None:
+        assert workflow["concurrency"]["cancel-in-progress"] is True
+
+    def test_every_job_has_a_timeout(self, workflow: dict) -> None:
+        """A hung job holds a runner until GitHub's six-hour default expires."""
+        for name, job in workflow["jobs"].items():
+            assert job.get("timeout-minutes"), name
+
+    def test_no_job_runs_the_paid_tests(self, workflow: dict) -> None:
+        """The `llm` marker costs money on every push. A CI run that spends is
+        a CI run that gets switched off."""
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+
+        assert "-m llm" not in text
+        assert "not llm" in text
+
+    def test_service_containers_wait_to_be_healthy(self, workflow: dict) -> None:
+        """Without a health check the job starts before PostgreSQL accepts
+        connections, and the first test fails on a race rather than on
+        anything real -- the same trap the compose file avoids."""
+        services = workflow["jobs"]["integration"]["services"]
+
+        for name, service in services.items():
+            assert "--health-cmd" in service["options"], name
+
+    def test_ci_secrets_are_obvious_placeholders(self, workflow: dict) -> None:
+        """No integration test makes a provider call, so these exist only to
+        satisfy the settings object. A real key in a workflow file is a real
+        key in a public repository."""
+        env = workflow["jobs"]["integration"]["env"]
+
+        assert "not-a-real-key" in env["GOOGLE_API_KEY"]
+        assert "not-a-real-key" in env["TAVILY_API_KEY"]
+
+    def test_images_are_built_but_never_pushed(self, workflow: dict) -> None:
+        """Proving an image builds needs no credentials. Publishing one does,
+        and this workflow should not have them."""
+        steps = workflow["jobs"]["images"]["steps"]
+        builds = [step for step in steps if "build-push-action" in str(step.get("uses", ""))]
+
+        assert builds
+        for step in builds:
+            assert step["with"]["push"] is False
+
+
+class TestMakeMatchesCI:
+    def test_the_check_target_runs_what_ci_runs(self) -> None:
+        """`make check` is documented as "everything CI runs", and for a while
+        it was not: CI enforced formatting and the target did not, so the first
+        push would have gone red on a check that passed locally. A claim in a
+        help string is still a claim.
+        """
+        makefile = (ROOT / "Makefile").read_text()
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+
+        assert "format --check" in workflow
+        assert "format --check" in makefile
