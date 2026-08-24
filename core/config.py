@@ -174,6 +174,21 @@ class Settings(BaseSettings):
     )
 
     # -- Observability -----------------------------------------------------
+    otel_exporter: str = Field(
+        default="none",
+        description=(
+            "Where spans go: none, console, or otlp. Defaults to none, which "
+            "leaves the OpenTelemetry API on its no-op implementation -- so an "
+            "untraced run costs nothing rather than a little, and nothing has "
+            "to be running for the application to start."
+        ),
+    )
+    otel_endpoint: str | None = Field(
+        default=None,
+        description="Collector URL, required when otel_exporter is otlp.",
+    )
+    otel_service_name: str = "deeptrace"
+
     langsmith_api_key: str | None = None
     langsmith_project: str = "deeptrace"
     run_log_path: Path = PROJECT_ROOT / "data" / "runs"

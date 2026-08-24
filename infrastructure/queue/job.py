@@ -83,6 +83,24 @@ class Job(BaseModel):
     error: str | None = None
 
     user_id: str | None = None
+
+    trace_carrier: dict[str, str] = Field(default_factory=dict)
+    """The submitting request's trace context, in W3C traceparent form.
+
+    A question is submitted by the API and executed minutes later by a worker
+    that may be on another machine. Traced naively that is two unrelated
+    traces, and the only question anyone actually asks -- why did this run take
+    nine minutes -- spans both.
+
+    Carried on the job rather than looked up, because by the time the worker
+    starts there is nothing left to look it up from: the HTTP request is long
+    over. The format is a header format, but nothing about it requires HTTP;
+    the two ends here are a queue producer and a queue consumer.
+
+    Empty for a job queued by the CLI, or by a version of the API that predates
+    this. That is not an error -- the worker simply starts a new trace.
+    """
+
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
     finished_at: datetime | None = None

@@ -296,8 +296,13 @@ class TestRunRecorderSwap:
         )
 
         assert recorder.pending == 1
+        # Scoped to this run rather than asserting the table is empty. The test
+        # database is shared across the session and other tests commit through
+        # their own engines, so an unfiltered SELECT here asserts something
+        # about every test that ran before it -- which is how this started
+        # failing two hundred tests away from the change that caused it.
         assert (
-            await db_session.execute(select(AgentRunRow))
+            await db_session.execute(select(AgentRunRow).where(AgentRunRow.research_id == "res_1"))
         ).scalars().all() == []  # nothing written yet
 
     async def test_flushing_writes_the_buffer(self, db_session: AsyncSession) -> None:

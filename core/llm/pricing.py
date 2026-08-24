@@ -25,7 +25,7 @@ from decimal import Decimal
 
 from core.llm.base import TokenUsage
 
-PRICING_LAST_VERIFIED = date(2025, 6, 1)
+PRICING_LAST_VERIFIED = date(2026, 8, 24)
 """When the table below was last checked against provider pricing pages.
 
 Cost figures should be re-verified before being published anywhere, including
@@ -49,6 +49,22 @@ class ModelPricing:
     output_per_million: Decimal
     cached_input_per_million: Decimal | None = None
     verified_on: date = PRICING_LAST_VERIFIED
+
+    superseded_on: date | None = None
+    """When this price is known to stop being correct.
+
+    Providers run promotions with published end dates, and a promotional rate
+    recorded without its expiry is a number that silently becomes wrong on a
+    date somebody already told us about. Costs computed after this date are
+    still reported -- refusing would be worse -- but ``is_stale`` marks them, so
+    a figure being quoted can be checked before it is quoted.
+    """
+
+    def is_stale(self, on: date | None = None) -> bool:
+        """Whether this price is past its published end date."""
+        if self.superseded_on is None:
+            return False
+        return (on or date.today()) >= self.superseded_on
 
     def cost_for(self, usage: TokenUsage) -> Decimal:
         """Compute the cost of one call from its token usage."""
@@ -77,16 +93,36 @@ PRICING: dict[str, ModelPricing] = {
     # what a run would cost at scale. State which of the two a number
     # represents; they are not the same claim.
     #
-    # The models currently routed to (see LLM_MODEL_* in .env) are deliberately
-    # absent until their prices are read off the provider's pricing page and
-    # entered here. Until then estimate_cost returns None and the run log shows
-    # "unknown", which is the correct report for a cost that has not been
-    # verified. Adding a guessed price would silently corrupt every total that
-    # depends on it, including any figure that ends up on a resume.
+    # Read off https://ai.google.dev/gemini-api/docs/pricing on 2026-08-24.
+    # Before this they were deliberately absent, so every run reported an
+    # unknown cost -- correct, but it made the cost view an empty column.
     #
-    #   To populate: https://ai.google.dev/gemini-api/docs/pricing
-    #   Then update PRICING_LAST_VERIFIED above.
+    # gemini-3.7-flash is on promotional pricing that DOUBLES on 2027-01-01:
+    # input 0.75 -> 1.50 and output 3.75 -> 7.50. Recorded here as the rate in
+    # force today, with ``superseded_on`` naming the date it stops being true,
+    # so a total computed next January is visibly stale rather than quietly
+    # wrong. See PROMOTIONAL below.
     #
+    "gemini-3.7-flash": ModelPricing(
+        input_per_million=_usd("0.75"),
+        output_per_million=_usd("3.75"),
+        cached_input_per_million=_usd("0.075"),
+        superseded_on=date(2027, 1, 1),
+    ),
+    "gemini-3.5-flash": ModelPricing(
+        input_per_million=_usd("1.50"),
+        output_per_million=_usd("9.00"),
+        cached_input_per_million=_usd("0.15"),
+    ),
+    "gemini-3.5-flash-lite": ModelPricing(
+        input_per_million=_usd("0.30"),
+        output_per_million=_usd("2.50"),
+        cached_input_per_million=_usd("0.03"),
+    ),
+    "gemini-embedding-001": ModelPricing(
+        input_per_million=_usd("0.15"),
+        output_per_million=_usd("0"),
+    ),
     # -- OpenAI ------------------------------------------------------------
     "gpt-4o": ModelPricing(
         input_per_million=_usd("2.50"),

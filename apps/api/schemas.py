@@ -315,3 +315,70 @@ class TicketResponse(BaseModel):
 
     ticket: str
     expires_in: int
+
+
+# ---------------------------------------------------------------------------
+# Cost
+# ---------------------------------------------------------------------------
+
+
+class AgentSpend(BaseModel):
+    """What one agent spent on one run."""
+
+    agent: str
+    model: str
+    calls: int
+    input_tokens: int
+    output_tokens: int
+    latency_ms: float
+    cost_usd: float | None = Field(
+        default=None,
+        description=(
+            "Null when any call in this group had no recorded price. A number "
+            "here is a measured cost, not an estimate."
+        ),
+    )
+    unpriced: int = Field(description="Calls in this group with no recorded price.")
+    failed: int
+
+
+class ToolSpend(BaseModel):
+    """What one tool cost in time.
+
+    Tools have no token cost, and on a rate-limited provider the wall clock is
+    dominated by waiting rather than spending -- so a view showing only model
+    spend explains the invoice and not the elapsed time.
+    """
+
+    tool: str
+    calls: int
+    latency_ms: float
+    failed: int
+
+
+class CostView(BaseModel):
+    """A run's bill, broken down, with its own trustworthiness attached.
+
+    ``complete`` is the field that matters. A total computed over calls whose
+    prices are unknown looks authoritative and understates, so the response says
+    outright whether every call was priced -- and a client that shows a figure
+    without reading it is showing a number the API did not stand behind.
+    """
+
+    research_id: str
+    total_cost_usd: float | None = None
+    complete: bool = Field(description="Whether every model call in this run had a recorded price.")
+    unpriced_calls: int
+    total_input_tokens: int
+    total_output_tokens: int
+    model_latency_ms: float
+    tool_latency_ms: float
+    by_agent: list[AgentSpend]
+    by_tool: list[ToolSpend]
+    stale_prices: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Models whose recorded price is past its published end date. The "
+            "figures still compute; they are just no longer safe to quote."
+        ),
+    )

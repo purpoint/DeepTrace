@@ -447,6 +447,81 @@ async def _queue() -> AsyncIterator[RedisJobQueue]:
         await queue.close()
 
 
+def _pricing(settings: Settings) -> int:
+    """Show what every model costs, and which figures are not trustworthy.
+
+    This command was referenced in ``core/llm/pricing.py`` long before it
+    existed -- the module docstring told the reader to run it. Documentation
+    describing a command nobody wrote is the same class of defect as a field
+    that is designed and never wired: it reads as a working feature.
+
+    What it exists to answer is narrow and specific: before a cost figure is
+    quoted anywhere, is it based on a price that was verified, and is that
+    price still current?
+    """
+    from datetime import date
+
+    from core.llm.pricing import PRICING, PRICING_LAST_VERIFIED, normalise_model
+
+    print(f"Model pricing  (per 1M tokens, USD; verified {PRICING_LAST_VERIFIED})")
+    print()
+    print(f"  {'model':28} {'input':>9} {'output':>9} {'cached':>9}  note")
+
+    routed = {
+        normalise_model(settings.llm_model_cheap),
+        normalise_model(settings.llm_model_strong),
+        normalise_model(settings.llm_model_embed),
+    }
+
+    for name in sorted(PRICING):
+        price = PRICING[name]
+        cached = (
+            f"{price.cached_input_per_million:>9}"
+            if price.cached_input_per_million is not None
+            else f"{'-':>9}"
+        )
+        notes = []
+        if name in routed:
+            notes.append("routed")
+        if price.superseded_on:
+            word = "EXPIRED" if price.is_stale() else "changes"
+            notes.append(f"{word} {price.superseded_on}")
+        print(
+            f"  {name:28} {price.input_per_million:>9} "
+            f"{price.output_per_million:>9} {cached}  {', '.join(notes)}"
+        )
+
+    # The part that matters. A model this deployment actually calls but has no
+    # price for reports "unknown" for every run, which is honest and useless --
+    # and it is invisible unless something says so.
+    unpriced = sorted(name for name in routed if name not in PRICING)
+    print()
+    if unpriced:
+        print("Configured but unpriced -- these runs report cost as unknown:")
+        for name in unpriced:
+            print(f"  {name}")
+        print()
+        print("  Add them to core/llm/pricing.py from the provider's pricing page,")
+        print("  and update PRICING_LAST_VERIFIED. Never estimate: a guessed price")
+        print("  silently corrupts every total that depends on it.")
+    else:
+        print("Every configured model is priced.")
+
+    stale = sorted(name for name, price in PRICING.items() if price.is_stale())
+    if stale:
+        print()
+        print("Prices past their published end date -- re-verify before quoting:")
+        for name in stale:
+            print(f"  {name}")
+
+    age = (date.today() - PRICING_LAST_VERIFIED).days
+    if age > 90:
+        print()
+        print(f"Last verified {age} days ago. Providers change pricing; re-check before quoting.")
+
+    return 0
+
+
 def _users(args: argparse.Namespace) -> int:
     """Create and list accounts, for an operator with a shell but no browser.
 
@@ -693,6 +768,7 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command")
     subcommands.add_parser("status", help="Show resolved configuration and depth budgets")
     subcommands.add_parser("check", help="Verify the foundation is correctly wired")
+    subcommands.add_parser("pricing", help="Show model prices and which are unverified")
 
     research = subcommands.add_parser("research", help="Run the full research workflow")
     research.add_argument("question", help="The research question")
@@ -788,6 +864,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "check":
         return _run_check(settings)
+    if args.command == "pricing":
+        return _pricing(settings)
     if args.command == "research":
         return _run_research(args)
     if args.command == "resume":

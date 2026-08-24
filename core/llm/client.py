@@ -25,6 +25,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
+from opentelemetry.trace import Status, StatusCode
 from pydantic import BaseModel, ValidationError
 
 from core.config import Settings, get_settings
@@ -47,6 +48,7 @@ from core.llm.rate_limit import NullRateLimiter, RateLimiter
 from core.llm.retry import DEFAULT_POLICY, RetryPolicy, with_retries
 from core.logging import get_logger
 from core.observability.recorder import AgentRun, NullRunRecorder, RunRecorder, new_run_id
+from core.observability.tracing import get_tracer
 from core.prompts.registry import Prompt
 
 log = get_logger(__name__)
@@ -228,7 +230,60 @@ class LLMClient:
             completed_at=datetime.now(UTC),
         )
         self.recorder.record_agent_run(record)
+        self._emit_span(record)
         return record.run_id
+
+    def _emit_span(self, record: AgentRun) -> None:
+        """Mirror one recorded model call into a span.
+
+        Emitted here, in the single place every call is already recorded, so
+        that a failure and a repair are traced as certainly as a success -- and
+        so no future call site can be added without one.
+
+        The span is created with explicit start and end times rather than by
+        wrapping the call, which matters for two reasons. Its duration is the
+        provider latency that was actually measured, not that plus the
+        bookkeeping around it. And creating it after the fact cannot change
+        control flow, which is the rule tracing has to obey: observability that
+        can alter the thing it observes is worse than none.
+
+        Nothing here is allowed to raise. A tracing backend having a bad day
+        must not fail a research run.
+        """
+        try:
+            tracer = get_tracer()
+            start_ns = int(record.started_at.timestamp() * 1_000_000_000)
+            completed = record.completed_at or record.started_at
+            current = tracer.start_span(
+                f"llm.{record.agent}",
+                start_time=start_ns,
+                attributes={
+                    key: value
+                    for key, value in {
+                        "deeptrace.research_id": record.research_id,
+                        "deeptrace.task_id": record.task_id,
+                        "deeptrace.agent": record.agent,
+                        "deeptrace.prompt": f"{record.prompt_name}@{record.prompt_version}",
+                        "deeptrace.tier": record.tier,
+                        "gen_ai.system": record.provider,
+                        "gen_ai.request.model": record.model,
+                        "gen_ai.usage.input_tokens": record.input_tokens,
+                        "gen_ai.usage.output_tokens": record.output_tokens,
+                        # Cost is a string because it is a Decimal, and putting
+                        # money through a float attribute to satisfy a type is
+                        # how a total drifts from what the provider billed.
+                        "deeptrace.cost_usd": str(record.cost_usd)
+                        if record.cost_usd is not None
+                        else None,
+                    }.items()
+                    if value is not None
+                },
+            )
+            if record.error_type:
+                current.set_status(Status(StatusCode.ERROR, record.error_type))
+            current.end(end_time=int(completed.timestamp() * 1_000_000_000))
+        except Exception:  # pragma: no cover - tracing must never break a run
+            log.debug("llm.span_failed", agent=record.agent)
 
     # -- completion --------------------------------------------------------
 

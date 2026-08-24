@@ -66,6 +66,7 @@ from core.llm.client import LLMClient
 from core.logging import bind_research_context, clear_research_context, get_logger
 from core.observability.progress import NullProgressEmitter, ProgressEmitter
 from core.observability.recorder import RunRecorder, new_run_id
+from core.observability.tracing import span
 from core.tools.search import SearchProvider, build_search_provider
 
 log = get_logger(__name__)
@@ -225,20 +226,37 @@ def build_graph(
     """
     graph = StateGraph(ResearchState)
 
+    def traced(name: str, node: object) -> object:
+        """Wrap a node so its execution is a span.
+
+        Applied here, at registration, rather than inside each of the nine node
+        functions. One wrapper is one place to be correct, and a node added
+        later is traced by being registered rather than by its author
+        remembering -- which is the same reason the tool span lives in ToolRun
+        and the model span lives in the recorder's seam.
+        """
+
+        async def run(state: object, *args: object, **kwargs: object) -> object:
+            research_id = state.get("research_id") if isinstance(state, dict) else None
+            with span(f"graph.{name}", **{"deeptrace.research_id": research_id}):
+                return await node(state, *args, **kwargs)  # type: ignore[operator]
+
+        return run
+
     # add_node's overloads do not accept a plain async callable returning the
     # state TypedDict, though that is exactly what LangGraph invokes and the
     # graph runs correctly. This is a limitation of the library's type stubs,
     # not a defect here, so it is silenced narrowly rather than by loosening the
     # node signatures -- which would remove real checking from the nodes
     # themselves to satisfy a third party's annotations.
-    graph.add_node("analyze", make_analyze_node(ctx))  # type: ignore[call-overload]
-    graph.add_node("plan", make_plan_node(ctx))  # type: ignore[call-overload]
-    graph.add_node("dispatch", make_dispatch_node())  # type: ignore[call-overload]
-    graph.add_node("research_task", make_task_node(ctx))  # type: ignore[call-overload]
-    graph.add_node("evidence", make_evidence_node(ctx))  # type: ignore[call-overload]
-    graph.add_node("analysis", make_analysis_node(ctx))  # type: ignore[call-overload]
-    graph.add_node("claims", make_claims_node(ctx))  # type: ignore[call-overload]
-    graph.add_node("verify", make_verify_node(ctx))  # type: ignore[call-overload]
+    graph.add_node("analyze", traced("analyze", make_analyze_node(ctx)))  # type: ignore[call-overload]
+    graph.add_node("plan", traced("plan", make_plan_node(ctx)))  # type: ignore[call-overload]
+    graph.add_node("dispatch", traced("dispatch", make_dispatch_node()))  # type: ignore[call-overload]
+    graph.add_node("research_task", traced("research_task", make_task_node(ctx)))  # type: ignore[call-overload]
+    graph.add_node("evidence", traced("evidence", make_evidence_node(ctx)))  # type: ignore[call-overload]
+    graph.add_node("analysis", traced("analysis", make_analysis_node(ctx)))  # type: ignore[call-overload]
+    graph.add_node("claims", traced("claims", make_claims_node(ctx)))  # type: ignore[call-overload]
+    graph.add_node("verify", traced("verify", make_verify_node(ctx)))  # type: ignore[call-overload]
 
     route = make_router(max_iterations)
     graph.add_edge(START, "analyze")
@@ -260,7 +278,7 @@ def build_graph(
     # The additional-research loop. Verification extends the plan when a claim
     # could not be settled; routing sends the run back to research if it did,
     # and the same iteration ceiling bounds this cycle as every other path.
-    graph.add_node("report", make_report_node(ctx))  # type: ignore[call-overload]
+    graph.add_node("report", traced("report", make_report_node(ctx)))  # type: ignore[call-overload]
     graph.add_conditional_edges(
         "verify",
         make_loop_router(max_iterations, ctx.max_tasks),
@@ -314,15 +332,23 @@ async def run_workflow(
     bind_research_context(research_id=research_id, depth=depth.value)
     try:
         log.info("graph.started", research_id=research_id, question=question[:200])
-        final: ResearchState = await app.ainvoke(
-            initial_state(
-                research_id=research_id,
-                question=question,
-                depth=depth.value,
-                max_tasks=ctx.max_tasks,
-            ),
-            config={"configurable": {"thread_id": research_id}},
-        )
+        # The run-level span every node nests under. Without it each node is
+        # the root of its own trace, and a waterfall that cannot show two nodes
+        # overlapping is a waterfall that answers none of the questions tracing
+        # was added for.
+        with span(
+            "graph.run",
+            **{"deeptrace.research_id": research_id, "deeptrace.depth": depth.value},
+        ):
+            final: ResearchState = await app.ainvoke(
+                initial_state(
+                    research_id=research_id,
+                    question=question,
+                    depth=depth.value,
+                    max_tasks=ctx.max_tasks,
+                ),
+                config={"configurable": {"thread_id": research_id}},
+            )
     finally:
         clear_research_context()
 

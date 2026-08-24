@@ -529,6 +529,71 @@ class ResearchRepository:
             return None
         return float(total)
 
+    async def cost_breakdown(self, research_id: str) -> list[dict[str, Any]]:
+        """What each agent spent on one run: calls, tokens, and cost.
+
+        Grouped in SQL rather than by loading the trace and summing in Python.
+        The trace is bounded by the depth budget so either would work today, but
+        the aggregate is the whole answer here and shipping the rows to compute
+        it is work done twice.
+
+        ``unpriced`` is counted per group and returned alongside the sum, for
+        the same reason ``total_cost`` counts it: SUM() skips NULLs, so a group
+        containing one unpriced call produces a total that looks authoritative
+        and understates. A caller that can see the count can say "at least
+        this much" instead of stating a number it cannot support.
+        """
+        result = await self.session.execute(
+            select(
+                AgentRunRow.agent,
+                AgentRunRow.model,
+                func.count(AgentRunRow.run_id).label("calls"),
+                func.coalesce(func.sum(AgentRunRow.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(AgentRunRow.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(AgentRunRow.latency_ms), 0.0).label("latency_ms"),
+                func.sum(AgentRunRow.cost_usd).label("cost_usd"),
+                func.count(AgentRunRow.run_id)
+                .filter(AgentRunRow.cost_usd.is_(None))
+                .label("unpriced"),
+                func.count(AgentRunRow.run_id)
+                .filter(AgentRunRow.status != "success")
+                .label("failed"),
+            )
+            .where(
+                AgentRunRow.research_id == research_id,
+                self._belongs_to_viewer(AgentRunRow.research_id),
+            )
+            .group_by(AgentRunRow.agent, AgentRunRow.model)
+            .order_by(func.sum(AgentRunRow.cost_usd).desc().nullslast())
+        )
+        return [dict(row._mapping) for row in result]
+
+    async def tool_breakdown(self, research_id: str) -> list[dict[str, Any]]:
+        """What each tool cost in time, which is the other half of a run's bill.
+
+        Search credits and fetch latency do not appear in a token total, and on
+        a rate-limited provider the wall clock is dominated by waiting rather
+        than by spending. A cost view that shows only model spend explains the
+        invoice and not the nine minutes.
+        """
+        result = await self.session.execute(
+            select(
+                ToolCallRow.tool,
+                func.count(ToolCallRow.call_id).label("calls"),
+                func.coalesce(func.sum(ToolCallRow.latency_ms), 0.0).label("latency_ms"),
+                func.count(ToolCallRow.call_id)
+                .filter(ToolCallRow.status != "success")
+                .label("failed"),
+            )
+            .where(
+                ToolCallRow.research_id == research_id,
+                self._belongs_to_viewer(ToolCallRow.research_id),
+            )
+            .group_by(ToolCallRow.tool)
+            .order_by(func.sum(ToolCallRow.latency_ms).desc())
+        )
+        return [dict(row._mapping) for row in result]
+
     async def delete_session(self, research_id: str) -> None:
         """Delete a run and everything it produced, via cascade.
 

@@ -48,6 +48,7 @@ from core.observability.progress import (
     ProgressEvent,
 )
 from core.observability.recorder import new_run_id
+from core.observability.tracing import continue_trace, current_trace_id
 from core.pipeline import resume_research, run_research
 from infrastructure.queue.job import Job, JobStatus
 from infrastructure.queue.redis_queue import RedisJobQueue
@@ -127,8 +128,32 @@ class Worker:
         heartbeat, which keeps the reservation alive, and the cancellation
         check, which can stop it. Running the research inline would make both
         impossible for the several minutes it takes.
+
+        The whole thing happens inside a span that continues the trace the API
+        started when the question was submitted, so a waterfall shows the queue
+        wait between them rather than two traces that cannot be related.
         """
-        bind_research_context(research_id=job.research_id, depth=job.depth.value)
+        with continue_trace(
+            job.trace_carrier,
+            "worker.execute",
+            **{
+                "deeptrace.research_id": job.research_id,
+                "deeptrace.job_id": job.id,
+                "deeptrace.attempt": job.attempts,
+                "deeptrace.depth": job.depth.value,
+            },
+        ):
+            return await self._execute(job)
+
+    async def _execute(self, job: Job) -> JobStatus:
+        bind_research_context(
+            research_id=job.research_id,
+            depth=job.depth.value,
+            # The id that joins a log search to a trace waterfall. Absent rather
+            # than zeroed when nothing is collecting, so it never looks like a
+            # trace that could be looked up and cannot.
+            **({"trace_id": tid} if (tid := current_trace_id()) else {}),
+        )
         await self._announce(
             job,
             EventKind.STARTED,

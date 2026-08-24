@@ -17,12 +17,16 @@ follow -- see :func:`core.prompts.registry.wrap_untrusted`.
 
 from __future__ import annotations
 
+import contextlib
 import time
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Generic, TypeVar
+from types import TracebackType
+from typing import Any, Generic, TypeVar, cast
 
 from core.logging import get_logger
+from core.observability import tracing as _tracing
 from core.observability.recorder import RunRecorder, ToolCall
 
 log = get_logger(__name__)
@@ -142,16 +146,38 @@ class ToolRun:
         self.retry_count = 0
         self._started = 0.0
         self._started_at = datetime.now(UTC)
+        self._span: AbstractContextManager[object] | None = None
 
     def __enter__(self) -> ToolRun:
         self._started = time.perf_counter()
         self._started_at = datetime.now(UTC)
+
+        # Every tool call becomes a span here, in the one place that already
+        # wraps every tool call. Instrumenting each tool separately would mean
+        # a tool added later is a tool that is silently untraced.
+        self._span = _tracing.span(
+            f"tool.{self.tool}",
+            **{
+                "deeptrace.research_id": self.research_id,
+                "deeptrace.task_id": self.task_id,
+                "deeptrace.agent": self.agent,
+                "deeptrace.tool": self.tool,
+            },
+        )
+        self._span.__enter__()
         return self
 
     def __exit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object
     ) -> None:
         latency_ms = (time.perf_counter() - self._started) * 1000
+
+        # Closed before the record is written, so the span's duration measures
+        # the tool call rather than the tool call plus the bookkeeping.
+        if self._span is not None:
+            with contextlib.suppress(Exception):
+                self._span.__exit__(exc_type, exc, cast("TracebackType | None", tb))
+            self._span = None
 
         if self.recorder is not None:
             self.recorder.record_tool_call(

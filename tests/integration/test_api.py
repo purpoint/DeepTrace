@@ -495,3 +495,158 @@ class TestTheDocumentation:
             "/research/{research_id}/cancel",
             "/health",
         }
+
+
+class TestTheCostView:
+    """What a run cost, broken down.
+
+    The trace endpoint already carries a total, and a total is the least useful
+    form of the answer: "this run cost eleven cents" prompts "on what". These
+    pin the breakdown, and more importantly they pin the honesty of it -- a sum
+    over calls whose price is unknown looks authoritative and understates.
+    """
+
+    @pytest.fixture
+    async def priced(self, api: AsyncClient, owner_id: str) -> AsyncIterator[str]:
+        """A finished run with two priced calls and one search.
+
+        Ids are unique per test. This fixture writes through a real engine and
+        commits, so unlike ``db_session`` nothing rolls back between tests --
+        fixed ids would pass once and then collide on the primary key, and the
+        failure appears in setup where it reads as a broken fixture rather than
+        as leaked state.
+        """
+        from decimal import Decimal
+
+        from sqlalchemy import delete
+
+        from core.models.run import ResearchRun
+        from infrastructure.db.models import AgentRunRow, ToolCallRow
+        from infrastructure.db.repositories.research import ResearchRepository
+        from infrastructure.db.repositories.scope import Viewer
+
+        tag = uuid4().hex[:10]
+        research_id = f"res_cost_{tag}"
+
+        run = ResearchRun(
+            research_id=research_id,
+            question="How does Kafka guarantee message ordering?",
+            depth=ResearchDepth.QUICK,
+        )
+        factory = api._transport.app.state.session_factory  # type: ignore[attr-defined]
+        async with factory() as session:
+            await ResearchRepository(session, Viewer.system()).save_run(run, user_id=owner_id)
+            session.add_all(
+                [
+                    AgentRunRow(
+                        run_id=f"run_c1_{tag}",
+                        research_id=research_id,
+                        agent="planner",
+                        provider="google",
+                        model="gemini-3.7-flash",
+                        prompt_name="planner",
+                        prompt_version="v1",
+                        input_tokens=1000,
+                        output_tokens=200,
+                        cost_usd=Decimal("0.00150000"),
+                    ),
+                    AgentRunRow(
+                        run_id=f"run_c2_{tag}",
+                        research_id=research_id,
+                        agent="evidence",
+                        provider="google",
+                        model="gemini-3.5-flash-lite",
+                        prompt_name="evidence",
+                        prompt_version="v1",
+                        input_tokens=500,
+                        output_tokens=100,
+                        cost_usd=Decimal("0.00040000"),
+                    ),
+                    ToolCallRow(
+                        call_id=f"call_c1_{tag}",
+                        research_id=research_id,
+                        tool="web_search",
+                        latency_ms=1200.0,
+                    ),
+                ]
+            )
+            await session.commit()
+
+        yield research_id
+
+        # Committed through a real engine, so nothing rolls this back. Left
+        # behind, these rows are visible to every later test in the session.
+        async with factory() as session:
+            await session.execute(delete(AgentRunRow).where(AgentRunRow.research_id == research_id))
+            await session.execute(delete(ToolCallRow).where(ToolCallRow.research_id == research_id))
+            await session.commit()
+
+    async def test_spend_is_broken_down_by_agent(self, api: AsyncClient, priced: str) -> None:
+        response = await api.get(f"/research/{priced}/cost")
+
+        assert response.status_code == 200
+        body = response.json()
+        agents = {row["agent"]: row for row in body["by_agent"]}
+        assert agents["planner"]["cost_usd"] == pytest.approx(0.0015)
+        assert agents["planner"]["input_tokens"] == 1000
+        assert body["total_input_tokens"] == 1500
+
+    async def test_tools_are_reported_in_time_not_tokens(
+        self, api: AsyncClient, priced: str
+    ) -> None:
+        """On a rate-limited provider the wall clock is dominated by waiting.
+        A cost view showing only model spend explains the invoice and not the
+        nine minutes."""
+        body = (await api.get(f"/research/{priced}/cost")).json()
+
+        assert body["by_tool"][0]["tool"] == "web_search"
+        assert body["tool_latency_ms"] == pytest.approx(1200.0)
+
+    async def test_a_fully_priced_run_says_so(self, api: AsyncClient, priced: str) -> None:
+        body = (await api.get(f"/research/{priced}/cost")).json()
+
+        assert body["complete"] is True
+        assert body["unpriced_calls"] == 0
+        assert body["total_cost_usd"] == pytest.approx(0.0019)
+
+    async def test_one_unpriced_call_makes_the_total_unknown(
+        self, api: AsyncClient, priced: str
+    ) -> None:
+        """SUM() skips NULLs, so a run with one unpriced call would otherwise
+        report a total that looks authoritative and understates."""
+        from infrastructure.db.models import AgentRunRow
+
+        factory = api._transport.app.state.session_factory  # type: ignore[attr-defined]
+        async with factory() as session:
+            session.add(
+                AgentRunRow(
+                    run_id=f"run_c3_{uuid4().hex[:10]}",
+                    research_id=priced,
+                    agent="reporter",
+                    provider="google",
+                    model="some-unpriced-model",
+                    prompt_name="reporter",
+                    prompt_version="v1",
+                    cost_usd=None,
+                )
+            )
+            await session.commit()
+
+        body = (await api.get(f"/research/{priced}/cost")).json()
+
+        assert body["complete"] is False
+        assert body["unpriced_calls"] == 1
+        assert body["total_cost_usd"] is None
+        # And the group containing it reports no cost rather than a partial sum.
+        reporter = next(row for row in body["by_agent"] if row["agent"] == "reporter")
+        assert reporter["cost_usd"] is None
+
+    async def test_another_account_cannot_read_the_cost(
+        self, api: AsyncClient, priced: str
+    ) -> None:
+        """Cost is an aggregate, and aggregates leak differently: nobody thinks
+        of a sum as data, and a sum over rows you may not read is still an
+        answer about them."""
+        await register(api, f"other-{uuid4().hex[:12]}@example.com")
+
+        assert (await api.get(f"/research/{priced}/cost")).status_code == 404

@@ -32,8 +32,10 @@ from apps.api.dependencies.identity import Authenticated, CurrentUser, Repositor
 from apps.api.dependencies.providers import Config, Limiter, Queue
 from apps.api.errors import ApiError
 from apps.api.schemas import (
+    AgentSpend,
     CancelResponse,
     ClaimView,
+    CostView,
     EvidenceView,
     JobView,
     ReportView,
@@ -42,10 +44,13 @@ from apps.api.schemas import (
     SourceView,
     SubmitRequest,
     SubmitResponse,
+    ToolSpend,
     TraceEntry,
     TraceView,
 )
+from core.llm.pricing import PRICING, normalise_model
 from core.logging import get_logger
+from core.observability.tracing import carrier_for_current_span
 from infrastructure.db.models import AgentRunRow
 from infrastructure.queue.job import Job
 from infrastructure.queue.redis_queue import RedisJobQueue
@@ -95,6 +100,9 @@ async def submit(
         depth=body.depth,
         max_tasks=body.max_tasks,
         user_id=user.id,
+        # The submitting span's context, so the worker's run continues this
+        # trace instead of starting an unrelated one.
+        trace_carrier=carrier_for_current_span(),
     )
 
     try:
@@ -374,6 +382,82 @@ async def get_trace(research_id: str, repository: Repository) -> TraceView:
         entries=entries,
         total_tokens=total_tokens,
         cost_usd=await repository.total_cost(research_id),
+    )
+
+
+@router.get("/{research_id}/cost", response_model=CostView, summary="What it cost")
+async def get_cost(research_id: str, repository: Repository) -> CostView:
+    """A run's bill, broken down by agent and by tool.
+
+    The trace endpoint already carries a total. This exists because a total is
+    the least useful form of the answer: "this run cost eleven cents" prompts
+    the question "on what", and the only actionable version names the agent.
+
+    Every figure here is measured rather than estimated, and the response says
+    so. A run containing calls with no recorded price reports ``complete:
+    false`` and counts them, because a sum over unpriced calls is a number that
+    looks authoritative and understates -- which is worse than admitting the
+    total is unknown.
+    """
+    await _require_research(repository, research_id)
+
+    agents = await repository.cost_breakdown(research_id)
+    tools = await repository.tool_breakdown(research_id)
+
+    unpriced = sum(int(row["unpriced"]) for row in agents)
+    total = await repository.total_cost(research_id)
+
+    # A group is only quotable if every call in it was priced. Reporting a
+    # partial sum per row would repeat, per agent, the exact mistake the
+    # run-level total is careful to avoid.
+    by_agent = [
+        AgentSpend(
+            agent=row["agent"],
+            model=row["model"],
+            calls=int(row["calls"]),
+            input_tokens=int(row["input_tokens"]),
+            output_tokens=int(row["output_tokens"]),
+            latency_ms=float(row["latency_ms"]),
+            cost_usd=(
+                float(row["cost_usd"])
+                if row["cost_usd"] is not None and not row["unpriced"]
+                else None
+            ),
+            unpriced=int(row["unpriced"]),
+            failed=int(row["failed"]),
+        )
+        for row in agents
+    ]
+
+    stale = sorted(
+        {
+            row["model"]
+            for row in agents
+            if (price := PRICING.get(normalise_model(row["model"]))) is not None
+            and price.is_stale()
+        }
+    )
+
+    return CostView(
+        research_id=research_id,
+        total_cost_usd=total,
+        complete=unpriced == 0 and bool(agents),
+        unpriced_calls=unpriced,
+        total_input_tokens=sum(int(row["input_tokens"]) for row in agents),
+        total_output_tokens=sum(int(row["output_tokens"]) for row in agents),
+        model_latency_ms=sum(float(row["latency_ms"]) for row in agents),
+        tool_latency_ms=sum(float(row["latency_ms"]) for row in tools),
+        by_agent=by_agent,
+        by_tool=[
+            ToolSpend(
+                tool=row["tool"],
+                calls=int(row["calls"]),
+                latency_ms=float(row["latency_ms"]),
+                failed=int(row["failed"]),
+            )
+            for row in tools
+        ],
+        stale_prices=stale,
     )
 
 
