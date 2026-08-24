@@ -936,7 +936,12 @@ def build_parser() -> argparse.ArgumentParser:
     # aside for this milestone before it was built. Writing raw benchmark
     # output anywhere else means committing regenerable measurement data.
     evaluate.add_argument("--results", default="data/eval_runs/results.jsonl")
-    evaluate.add_argument("--output", default="docs/EVALUATION.md")
+    # Repo root, not docs/. The roadmap says docs/EVALUATION.md, but docs/ is
+    # git-ignored -- so writing there would mean the one artefact that makes
+    # this project's quality claims checkable never reaches the repository.
+    # Benchmark numbers are the most quotable thing here; they should be the
+    # most visible too.
+    evaluate.add_argument("--output", default="EVALUATION.md")
     evaluate.set_defaults(dry_run=True, resume=True)
 
     research = subcommands.add_parser("research", help="Run the full research workflow")
