@@ -447,6 +447,110 @@ async def _queue() -> AsyncIterator[RedisJobQueue]:
         await queue.close()
 
 
+def _evaluate(args: argparse.Namespace, settings: Settings) -> int:
+    """Run the benchmark and write EVALUATION.md.
+
+    ``--dry-run`` is the default-adjacent mode for a reason: a full benchmark
+    makes hundreds of model calls, and on a free tier that is most of a day's
+    quota. The dry run validates the dataset and shows exactly what would be
+    spent, so nobody discovers a broken question after paying for twenty-three
+    others.
+    """
+    from pathlib import Path
+
+    from core.evaluation.dataset import BENCHMARK, coverage_summary
+    from core.evaluation.harness import (
+        BenchmarkResults,
+        make_executor,
+        provenance,
+        run_benchmark,
+    )
+    from core.evaluation.metrics import RunEvaluation, aggregate
+    from core.evaluation.report import render
+
+    depth = ResearchDepth(args.depth)
+    budget = DEPTH_BUDGETS[depth]
+    questions = BENCHMARK[: args.limit] if args.limit else BENCHMARK
+
+    results_path = Path(args.results)
+    store = BenchmarkResults(results_path)
+    already = store.completed_ids() if args.resume else set()
+    outstanding = [q for q in questions if q.id not in already]
+
+    print(f"Benchmark: {len(questions)} question(s) at depth {depth.value}")
+    print(f"  by type      {coverage_summary()}")
+    print(f"  budget       {budget.max_tasks} tasks, {budget.max_sources} sources each")
+    if already:
+        print(f"  already done {len(already)} (resuming; use --no-resume to redo)")
+    print(f"  to run       {len(outstanding)}")
+    print(f"  results      {results_path}")
+    print()
+
+    if args.dry_run:
+        # Deliberately concrete about the bill. A run makes roughly one model
+        # call per task plus one each for analysis, verification and the report;
+        # stated as an order of magnitude rather than a promise, because the
+        # research agent's loop is bounded but not fixed.
+        per_run = budget.max_tasks + 4
+        print("Dry run. Nothing was called and nothing was spent.")
+        print(
+            f"  rough model calls  ~{per_run * len(outstanding)} "
+            f"({per_run} per question x {len(outstanding)})"
+        )
+        print(f"  strong-tier calls  ~{3 * len(outstanding)} (planner, analyst, reporter)")
+        print()
+        print("  Run it for real with:  deeptrace evaluate --run")
+        return 0
+
+    if not outstanding:
+        print("Nothing to run. Every question already has a result.")
+    else:
+
+        def announce(_question: object, evaluation: RunEvaluation) -> None:
+            mark = "ok " if evaluation.succeeded else "FAIL"
+            print(
+                f"  [{mark}] {evaluation.question_id:8} "
+                f"cite={evaluation.citation_correctness} "
+                f"grounded={evaluation.groundedness} "
+                f"{evaluation.elapsed_seconds:.0f}s"
+            )
+
+        executor = make_executor(depth=depth, settings=settings, max_tasks=args.max_tasks)
+        asyncio.run(
+            run_benchmark(
+                executor,
+                questions=outstanding,
+                results=store,
+                resume=args.resume,
+                on_result=announce,
+            )
+        )
+
+    rows = store.load()
+    if not rows:
+        print("No results recorded.")
+        return 1
+
+    # Rebuilt from the results file rather than from what this process ran, so
+    # a resumed benchmark reports the whole suite rather than today's slice.
+    evaluations = [RunEvaluation.from_row(row) for row in rows]
+    document = render(
+        evaluations,
+        provenance(depth=depth, settings=settings, questions=questions),
+    )
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(document, encoding="utf-8")
+
+    summary = aggregate(evaluations)
+    print()
+    for name, measurement in summary.items():
+        print(f"  {name:24} {measurement}")
+    print()
+    print(f"Wrote {output}")
+    return 0
+
+
 def _pricing(settings: Settings) -> int:
     """Show what every model costs, and which figures are not trustworthy.
 
@@ -770,6 +874,35 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("check", help="Verify the foundation is correctly wired")
     subcommands.add_parser("pricing", help="Show model prices and which are unverified")
 
+    evaluate = subcommands.add_parser(
+        "evaluate", help="Run the benchmark and write docs/EVALUATION.md"
+    )
+    evaluate.add_argument(
+        "--run",
+        dest="dry_run",
+        action="store_false",
+        help="Actually run it. Without this flag nothing is called and nothing is spent.",
+    )
+    evaluate.add_argument(
+        "--depth",
+        choices=[d.value for d in ResearchDepth],
+        default=ResearchDepth.QUICK.value,
+        help="Budget per question (default: quick -- a benchmark is run repeatedly)",
+    )
+    evaluate.add_argument(
+        "--limit", type=int, default=None, metavar="N", help="Only the first N questions"
+    )
+    evaluate.add_argument("--max-tasks", type=int, default=None, metavar="N")
+    evaluate.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="Re-run questions that already have a result, instead of skipping them",
+    )
+    evaluate.add_argument("--results", default="data/evaluation/results.jsonl")
+    evaluate.add_argument("--output", default="docs/EVALUATION.md")
+    evaluate.set_defaults(dry_run=True, resume=True)
+
     research = subcommands.add_parser("research", help="Run the full research workflow")
     research.add_argument("question", help="The research question")
     research.add_argument(
@@ -866,6 +999,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_check(settings)
     if args.command == "pricing":
         return _pricing(settings)
+    if args.command == "evaluate":
+        return _evaluate(args, settings)
     if args.command == "research":
         return _run_research(args)
     if args.command == "resume":
