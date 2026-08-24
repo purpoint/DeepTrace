@@ -458,7 +458,7 @@ def _evaluate(args: argparse.Namespace, settings: Settings) -> int:
     """
     from pathlib import Path
 
-    from core.evaluation.dataset import BENCHMARK, coverage_summary
+    from core.evaluation.dataset import BENCHMARK, BenchmarkQuestion, coverage_summary
     from core.evaluation.harness import (
         BenchmarkResults,
         make_executor,
@@ -470,7 +470,27 @@ def _evaluate(args: argparse.Namespace, settings: Settings) -> int:
 
     depth = ResearchDepth(args.depth)
     budget = DEPTH_BUDGETS[depth]
-    questions = BENCHMARK[: args.limit] if args.limit else BENCHMARK
+    if args.questions:
+        wanted = [item.strip() for item in args.questions.split(",") if item.strip()]
+        known = {question.id: question for question in BENCHMARK}
+        unknown = [item for item in wanted if item not in known]
+        if unknown:
+            print(f"unknown question id(s): {', '.join(unknown)}")
+            return 1
+        questions = tuple(known[item] for item in wanted)
+    elif args.per_type:
+        # N from each research type rather than the first N overall. A subset
+        # taken off the top of the list is five comparisons and one
+        # explanation, which reports a comparison score and calls it a
+        # benchmark -- the same failure the dataset test guards against.
+        grouped: dict[str, list[BenchmarkQuestion]] = {}
+        for question in BENCHMARK:
+            grouped.setdefault(question.research_type.value, []).append(question)
+        questions = tuple(
+            question for group in grouped.values() for question in group[: args.per_type]
+        )
+    else:
+        questions = BENCHMARK[: args.limit] if args.limit else BENCHMARK
 
     results_path = Path(args.results)
     store = BenchmarkResults(results_path)
@@ -892,6 +912,19 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument(
         "--limit", type=int, default=None, metavar="N", help="Only the first N questions"
     )
+    evaluate.add_argument(
+        "--questions",
+        default=None,
+        metavar="IDS",
+        help="Comma-separated question ids, e.g. cmp-01,exp-01",
+    )
+    evaluate.add_argument(
+        "--per-type",
+        type=int,
+        default=None,
+        metavar="N",
+        help="N questions from each research type, so a subset stays balanced",
+    )
     evaluate.add_argument("--max-tasks", type=int, default=None, metavar="N")
     evaluate.add_argument(
         "--no-resume",
@@ -899,7 +932,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Re-run questions that already have a result, instead of skipping them",
     )
-    evaluate.add_argument("--results", default="data/evaluation/results.jsonl")
+    # data/eval_runs/ is already reserved in .gitignore -- the path was set
+    # aside for this milestone before it was built. Writing raw benchmark
+    # output anywhere else means committing regenerable measurement data.
+    evaluate.add_argument("--results", default="data/eval_runs/results.jsonl")
     evaluate.add_argument("--output", default="docs/EVALUATION.md")
     evaluate.set_defaults(dry_run=True, resume=True)
 
