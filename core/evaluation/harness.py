@@ -71,8 +71,21 @@ class BenchmarkResults:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def completed_ids(self) -> set[str]:
-        """Question ids already recorded, so a resumed run does not pay twice."""
+    def completed_ids(self, *, include_failures: bool = False) -> set[str]:
+        """Question ids worth skipping on a resume.
+
+        **Only the ones that succeeded**, and that distinction is the whole
+        point. A question can fail for reasons that have nothing to do with the
+        system being measured -- the first attempt at a baseline here died
+        because the provider returned 503 for the strong-tier model on three
+        questions in a row. Treating those as complete would resume past them
+        and record a provider outage as their permanent benchmark result: three
+        questions scored as failures forever, because of an afternoon.
+
+        A failed row is still kept in the file. It is the record of what was
+        attempted, and the rerun simply appends a newer one -- the report reads
+        the last row for each id.
+        """
         if not self.path.exists():
             return set()
 
@@ -81,7 +94,9 @@ class BenchmarkResults:
             if not line.strip():
                 continue
             try:
-                done.add(str(json.loads(line)["question_id"]))
+                row = json.loads(line)
+                if include_failures or row.get("succeeded"):
+                    done.add(str(row["question_id"]))
             except (json.JSONDecodeError, KeyError):
                 # A truncated final line from a killed process. Skipped rather
                 # than fatal: the point of this format is that the rest is
@@ -94,16 +109,28 @@ class BenchmarkResults:
             handle.write(json.dumps(_encode(evaluation)) + "\n")
 
     def load(self) -> list[dict[str, Any]]:
+        """The latest result for each question, in the order first attempted.
+
+        Deduplicated by question id because a rerun appends rather than
+        rewrites: without this, a question retried after an outage would appear
+        twice and its failed attempt would be averaged in alongside the good
+        one, dragging every mean down by an amount nobody could account for.
+        """
         if not self.path.exists():
             return []
-        rows = []
+
+        latest: dict[str, dict[str, Any]] = {}
         for line in self.path.read_text().splitlines():
-            if line.strip():
-                try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        return rows
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            question_id = str(row.get("question_id", ""))
+            if question_id:
+                latest[question_id] = row
+        return list(latest.values())
 
 
 async def run_benchmark(
