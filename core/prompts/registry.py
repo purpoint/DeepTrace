@@ -18,6 +18,8 @@ render, or worse, render wrongly.
 
 from __future__ import annotations
 
+import re
+import secrets
 from dataclasses import dataclass, field
 from string import Template
 
@@ -93,6 +95,10 @@ always delimited, so a model can tell document text from task text.
 """
 
 
+_FENCE_TOKEN = re.compile(r"<<<\s*(?:BEGIN|END)\s+UNTRUSTED[^>]*>>>", re.IGNORECASE)
+"""Anything that looks like one of this module's own delimiters."""
+
+
 def wrap_untrusted(content: str, *, source: str, max_chars: int | None = None) -> str:
     """Wrap retrieved content so it cannot be mistaken for instructions.
 
@@ -105,16 +111,36 @@ def wrap_untrusted(content: str, *, source: str, max_chars: int | None = None) -
 
     The delimiters matter as much as the preamble. Without an explicit end
     marker, content that ends mid-sentence blurs into whatever follows it.
+
+    **The delimiter is unguessable, and that is the point.** A fixed marker is
+    one the content can write for itself: a page containing the literal closing
+    token ends the quoted region early, and everything it puts afterwards
+    arrives where the model expects *task* text rather than document text. That
+    is not a hypothetical -- it is the standard escape against exactly this
+    construction, and it defeats the preamble above completely, because the
+    preamble is about what is inside the fence and the attacker has stepped
+    outside it.
+
+    So each wrap gets a random nonce, generated per call. A page cannot close a
+    fence whose name it cannot predict. Any text that merely *looks* like a
+    delimiter is also stripped from the body before wrapping, so an attacker
+    cannot muddy the transcript with near-misses even though they could not
+    forge the real one.
     """
     body = content
     if max_chars is not None and len(body) > max_chars:
         body = body[:max_chars] + "\n[content truncated]"
 
+    # Removed before the nonce is chosen, so a page cannot smuggle in something
+    # that reads as a delimiter even when it cannot guess the live one.
+    body = _FENCE_TOKEN.sub("[delimiter removed]", body)
+
+    nonce = secrets.token_hex(4)
     return (
         f"{UNTRUSTED_PREAMBLE}\n\n"
-        f"<<<BEGIN UNTRUSTED CONTENT source={source}>>>\n"
+        f"<<<BEGIN UNTRUSTED CONTENT {nonce} source={source}>>>\n"
         f"{body}\n"
-        f"<<<END UNTRUSTED CONTENT>>>"
+        f"<<<END UNTRUSTED CONTENT {nonce}>>>"
     )
 
 
