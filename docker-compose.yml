@@ -1,0 +1,177 @@
+# Five services, and one job that has to finish before two of them start.
+#
+# The ordering is the substance of this file. `depends_on` on its own only
+# waits for a container to *start*, which for PostgreSQL means the process
+# exists and is still reading its own write-ahead log -- so the API connects,
+# fails, and restarts in a loop that looks like a broken application. Every
+# dependency here waits on a condition instead.
+#
+# Migrations are a separate one-shot service rather than an API entrypoint step.
+# Running them from the API means two API replicas race to migrate the same
+# database on every deploy, and Alembic is not safe under that. As its own job
+# it runs once, and the services that need the schema wait for it to exit zero.
+
+name: deeptrace
+
+services:
+  # ---------------------------------------------------------------------
+  # Data stores
+  # ---------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-deeptrace}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-deeptrace}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # -U and -d are not optional decoration: pg_isready with no arguments
+      # checks the default database as the default user, which can answer
+      # before the application's own database exists.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-deeptrace} -d ${POSTGRES_DB:-deeptrace}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # Append-only persistence. The queue's guarantee is that a job taken by a
+    # worker that dies is taken again -- which a restart with an empty Redis
+    # quietly breaks, losing every queued job instead.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # Schema, once
+  # ---------------------------------------------------------------------
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-deeptrace}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-deeptrace}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Runs to completion and stays exited. Restarting it on failure would hide
+    # a broken migration behind a retry loop, and a migration that fails is
+    # something a person needs to read.
+    restart: "no"
+
+  # ---------------------------------------------------------------------
+  # Application
+  # ---------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "core.cli", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    environment: &app_env
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-deeptrace}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-deeptrace}
+      REDIS_URL: redis://redis:6379/0
+      # Required, and deliberately without a default. A signing key with a
+      # default is a signing key every deployment shares.
+      # Quoted, because the message contains a colon-space and YAML would
+      # otherwise read it as a nested mapping -- a compose file that does not
+      # parse at all.
+      JWT_SECRET: "${JWT_SECRET:?set JWT_SECRET to at least 32 characters}"
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:?GOOGLE_API_KEY must be set}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:?TAVILY_API_KEY must be set}
+      APP_ENV: ${APP_ENV:-production}
+      JSON_LOGS: ${JSON_LOGS:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LLM_MODEL_CHEAP: ${LLM_MODEL_CHEAP:-gemini-3.5-flash-lite}
+      LLM_MODEL_STRONG: ${LLM_MODEL_STRONG:-gemini-3.7-flash}
+      LLM_REQUESTS_PER_MINUTE: ${LLM_REQUESTS_PER_MINUTE:-10}
+      MAX_GRAPH_ITERATIONS: ${MAX_GRAPH_ITERATIONS:-60}
+      OTEL_EXPORTER: ${OTEL_EXPORTER:-none}
+      OTEL_ENDPOINT: ${OTEL_ENDPOINT:-}
+      # Empty on purpose. nginx serves the client and the API from one origin,
+      # so there is no cross-origin request to allow -- and an origin list that
+      # is not needed is one that will be widened by somebody debugging.
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # /health always returns 200 and reports each dependency in its body, so
+      # this proves the service is answering rather than that everything is
+      # well. Container health here means "can serve"; whether it can serve
+      # *usefully* is what the body says.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "core.cli", "work"]
+    environment: *app_env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # A worker serves no port, so there is nothing to curl. This asks Redis
+      # whether the worker's own process is alive, which is weaker than an
+      # endpoint and stated as such -- it catches a dead process, not a stuck
+      # one. A wedged worker is caught by the queue instead: its heartbeat
+      # stops, the reservation expires, and another worker reclaims the job.
+      test: ["CMD-SHELL", "pgrep -f 'core.cli work' > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Scale with `docker compose up --scale worker=3`. The queue is
+    # at-least-once and jobs carry their research id, so a second worker
+    # resumes from the checkpoint rather than repeating paid work.
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+# Note on what is deliberately not exposed. Only `web` publishes a port.
+# PostgreSQL, Redis, and the API are reachable on the compose network and
+# nowhere else, so the API cannot be called around the proxy and the database
+# is not on the host's interface. Add a port mapping to debug, and remove it
+# again -- a published database port is how a development convenience becomes
+# the way in.

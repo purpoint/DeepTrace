@@ -63,6 +63,7 @@ dev = [
     "pytest-cov>=6.0",
     "ruff>=0.8",              # linter and formatter in one tool
     "mypy>=1.13",
+    "pyyaml>=6.0",            # the deployment tests parse docker-compose.yml
 ]
 
 [project.urls]

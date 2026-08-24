@@ -1,6 +1,7 @@
 .DEFAULT_GOAL := help
 .PHONY: help setup install lint format typecheck test test-int test-cov check clean run \
-	db-up db-down db-reset db-revision api worker web web-install web-check
+	db-up db-down db-reset db-revision api worker web web-install web-check \
+	up down destroy logs
 
 VENV   := .venv
 PYTHON := $(VENV)/bin/python
@@ -76,6 +77,19 @@ db-reset: ## Drop everything and rebuild from migrations
 
 db-revision: ## Generate a migration from model changes: make db-revision m="what changed"
 	$(ALEMBIC) revision --autogenerate -m "$(m)"
+
+up: ## Build and start the whole stack in containers
+	docker compose up --build -d
+	@echo "Client on http://localhost:$${WEB_PORT:-8080}"
+
+down: ## Stop the stack, keeping the database and queue volumes
+	docker compose down
+
+destroy: ## Stop the stack and delete its data. Not reversible.
+	docker compose down --volumes
+
+logs: ## Follow the logs of every service
+	docker compose logs -f
 
 clean: ## Remove caches and build artifacts
 	find . -type d -name __pycache__ -not -path "./$(VENV)/*" -exec rm -rf {} +

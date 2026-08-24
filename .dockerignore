@@ -1,0 +1,32 @@
+# Keep the build context small and, more importantly, keep secrets out of it.
+# Anything here can end up in an image layer, and a layer is readable by anyone
+# who can pull the image.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+.venv
+**/__pycache__
+**/*.pyc
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Tests are not run inside the runtime image, and docs/ is git-ignored anyway.
+tests/
+docs/
+data/
+scripts/
+
+# The web client builds in its own image, from ./apps/web as its own context.
+# Excluding it here keeps the React source out of the Python image entirely
+# rather than merely out of the way -- the API has no use for it, and every
+# file in an image is a file somebody has to account for.
+apps/web
+
+*.md
+!README.md
