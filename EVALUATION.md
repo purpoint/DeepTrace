@@ -8,9 +8,9 @@ over from an earlier configuration.
 
 - **Measured at** — 2026-08-25T17:37:37+00:00
 - **Commit** — `66c6c5d`
-- **Depth budget** — quick
 - **Cheap tier** — `gemini-3.5-flash-lite`
 - **Strong tier** — `gemini-3.5-flash`
+- **Depth budget** — quick
 - **Questions attempted** — 24
 - **Runs that produced a report** — 3
 

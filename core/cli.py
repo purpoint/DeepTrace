@@ -543,6 +543,7 @@ def _evaluate(args: argparse.Namespace, settings: Settings) -> int:
                 results=store,
                 resume=args.resume,
                 on_result=announce,
+                stamp=provenance(depth=depth, settings=settings, questions=questions),
             )
         )
 

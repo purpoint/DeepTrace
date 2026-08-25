@@ -45,6 +45,64 @@ def _cell(measurement: Measurement) -> str:
     return f"{measurement.value:.2f}"
 
 
+def _stamped(results: list[RunEvaluation], field: str) -> list[str]:
+    """The distinct values of one provenance field across the measured runs.
+
+    Read from the rows rather than from the current process, because the rows
+    are the only place that knows. A benchmark large enough to need resuming --
+    and a free-tier quota of twenty requests a day makes twenty-four questions
+    exactly that -- collects its rows over several sittings, and the code has
+    moved in between at least once here.
+    """
+    seen: list[str] = []
+    for result in results:
+        if not result.succeeded:
+            continue
+        value = getattr(result, field, "")
+        if value and value not in seen:
+            seen.append(value)
+    return seen
+
+
+def _provenance_line(
+    label: str, results: list[RunEvaluation], field: str, fallback: Any
+) -> tuple[str, bool]:
+    """One header line, and whether the rows disagreed about it.
+
+    When no row carries a stamp the answer is *unknown*, and the process
+    rendering the document is not asked. It knows what it is configured with
+    now, which is a different question from what produced rows written days ago
+    -- and answering the second with the first is how a report ends up naming
+    the wrong model in the one line a reader would check. That is not a
+    hypothetical either: rendering this file from a shell without the
+    environment override captioned three `gemini-3.5-flash` runs as
+    `gemini-3.7-flash`, a model that had not answered a request all day.
+    """
+    del fallback  # deliberately unused; see above
+    values = _stamped(results, field)
+    if not values:
+        return f"- **{label}** — unknown, not recorded for these runs", False
+    if len(values) == 1:
+        return f"- **{label}** — `{values[0]}`", False
+    rendered = ", ".join(f"`{value}`" for value in values)
+    return f"- **{label}** — {len(values)} across these runs: {rendered}", True
+
+
+def _measured_at(results: list[RunEvaluation], provenance: dict[str, Any]) -> str:
+    """When the runs happened, not when the document was written.
+
+    Those coincide only for a suite that finished in one sitting, which a daily
+    quota of twenty requests makes impossible here. Rendering the report a week
+    later must not restamp week-old numbers as today's.
+    """
+    stamps = sorted(_stamped(results, "measured_at"))
+    if not stamps:
+        return str(provenance.get("measured_at", "unknown")) + " (document written; runs undated)"
+    if len(stamps) == 1:
+        return stamps[0]
+    return f"{stamps[0]} to {stamps[-1]}, over {len(stamps)} sittings"
+
+
 def render(results: list[RunEvaluation], provenance: dict[str, Any]) -> str:
     """Render EVALUATION.md."""
     summary = aggregate(results)
@@ -60,15 +118,36 @@ def render(results: list[RunEvaluation], provenance: dict[str, Any]) -> str:
         "",
         "## What was measured",
         "",
-        f"- **Measured at** — {provenance.get('measured_at', 'unknown')}",
-        f"- **Commit** — `{provenance.get('commit') or 'unknown'}`",
+        f"- **Measured at** — {_measured_at(results, provenance)}",
+    ]
+
+    mixed = False
+    for label, field, fallback in (
+        ("Commit", "commit", provenance.get("commit")),
+        ("Cheap tier", "model_cheap", provenance.get("model_cheap")),
+        ("Strong tier", "model_strong", provenance.get("model_strong")),
+    ):
+        line, disagreed = _provenance_line(label, results, field, fallback)
+        lines.append(line)
+        mixed = mixed or disagreed
+
+    lines += [
         f"- **Depth budget** — {provenance.get('depth', 'unknown')}",
-        f"- **Cheap tier** — `{provenance.get('model_cheap', 'unknown')}`",
-        f"- **Strong tier** — `{provenance.get('model_strong', 'unknown')}`",
         f"- **Questions attempted** — {len(results)}",
         f"- **Runs that produced a report** — {len(succeeded)}",
         "",
     ]
+
+    if mixed:
+        lines += [
+            "> **These runs were not all measured on the same thing.** The rows",
+            "> above disagree on the commit or the model, because the suite was",
+            "> resumed after the code or the configuration moved. Every figure",
+            "> below is therefore a mean across configurations, which is not the",
+            "> same claim as a benchmark score, and the per-question table is the",
+            "> only place the difference is visible.",
+            "",
+        ]
 
     if failed:
         lines += [

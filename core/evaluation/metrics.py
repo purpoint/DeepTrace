@@ -102,6 +102,15 @@ class RunEvaluation:
     claims_published: int = 0
     claims_rejected: int = 0
 
+    # Stamped per row rather than once per report. A benchmark that has to be
+    # resumed across days -- which a 20-requests-per-day quota forces -- collects
+    # rows from several commits and possibly several models, and a single header
+    # over all of them claims a uniformity that was never measured.
+    commit: str = ""
+    model_cheap: str = ""
+    model_strong: str = ""
+    measured_at: str = ""
+
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> RunEvaluation:
         """Rebuild one evaluation from its recorded JSON.
@@ -145,6 +154,10 @@ class RunEvaluation:
             evidence=int(row.get("evidence", 0)),
             claims_published=int(row.get("claims_published", 0)),
             claims_rejected=int(row.get("claims_rejected", 0)),
+            commit=str(row.get("commit", "")),
+            model_cheap=str(row.get("model_cheap", "")),
+            model_strong=str(row.get("model_strong", "")),
+            measured_at=str(row.get("measured_at", "")),
         )
 
 

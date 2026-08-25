@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -84,7 +84,8 @@ class BenchmarkResults:
 
         A failed row is still kept in the file. It is the record of what was
         attempted, and the rerun simply appends a newer one -- the report reads
-        the last row for each id.
+        the last *successful* row for each id, falling back to the last failure
+        only for a question that has never produced one. See `load`.
         """
         if not self.path.exists():
             return set()
@@ -109,12 +110,25 @@ class BenchmarkResults:
             handle.write(json.dumps(_encode(evaluation)) + "\n")
 
     def load(self) -> list[dict[str, Any]]:
-        """The latest result for each question, in the order first attempted.
+        """The latest *measured* result for each question, in the order first
+        attempted.
 
         Deduplicated by question id because a rerun appends rather than
         rewrites: without this, a question retried after an outage would appear
         twice and its failed attempt would be averaged in alongside the good
         one, dragging every mean down by an amount nobody could account for.
+
+        **A failure never displaces a success.** `completed_ids` deliberately
+        does not treat a failed question as done, so any rerun re-attempts every
+        question an outage killed -- and if that rerun is itself rate-limited,
+        taking the newest row per question would replace real measurements with
+        empty ones. That is not hypothetical: it happened here, and three
+        finished runs became "0 of 24 produced a report" in a file whose whole
+        purpose is to say what was measured.
+
+        A failed row carries no metrics, so it can never be the more informative
+        of the two. It is kept only while a question has never succeeded, so the
+        report can still say why that question has no numbers.
         """
         if not self.path.exists():
             return []
@@ -128,8 +142,12 @@ class BenchmarkResults:
             except json.JSONDecodeError:
                 continue
             question_id = str(row.get("question_id", ""))
-            if question_id:
-                latest[question_id] = row
+            if not question_id:
+                continue
+            previous = latest.get(question_id)
+            if previous is not None and previous.get("succeeded") and not row.get("succeeded"):
+                continue
+            latest[question_id] = row
         return list(latest.values())
 
 
@@ -140,6 +158,7 @@ async def run_benchmark(
     results: BenchmarkResults | None = None,
     resume: bool = True,
     on_result: Callable[[BenchmarkQuestion, RunEvaluation], None] | None = None,
+    stamp: dict[str, Any] | None = None,
 ) -> list[RunEvaluation]:
     """Run each question and evaluate it, recording as it goes.
 
@@ -186,6 +205,15 @@ async def run_benchmark(
                 succeeded=False,
                 error=f"{type(exc).__name__}: {exc}"[:500],
                 elapsed_seconds=time.perf_counter() - started,
+            )
+
+        if stamp:
+            evaluation = replace(
+                evaluation,
+                commit=str(stamp.get("commit", "")),
+                model_cheap=str(stamp.get("model_cheap", "")),
+                model_strong=str(stamp.get("model_strong", "")),
+                measured_at=datetime.now(UTC).isoformat(timespec="seconds"),
             )
 
         evaluations.append(evaluation)
