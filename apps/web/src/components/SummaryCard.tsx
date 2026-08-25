@@ -25,11 +25,16 @@
  * and a notepad texture with doodles would read as a different product.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { useReport, useResearch } from "../api/hooks";
 import type { ReportView, ResearchDetail } from "../api/types";
+
+const EXIT_MS = 160;
+/*How long the card takes to leave. Must match the `card-out` animation in the
+Tailwind theme: shorter here and the card is torn off mid-flight, longer and it
+sits invisible for a beat while the page waits on a timer.*/
 import { Spinner } from "./ui";
 
 /** Strip the trailing citation run from the summary sentence.
@@ -139,17 +144,50 @@ export function SummaryCard({
   onClose: () => void;
 }) {
   const panel = useRef<HTMLDivElement>(null);
+  const [leaving, setLeaving] = useState(false);
+  const leavingRef = useRef(false);
+
+  // Dismissal plays the exit animation before unmounting.
+  //
+  // Without this the card vanishes on the frame the state changes, and an
+  // entrance that was animated followed by a disappearance that was not reads
+  // worse than no animation at all -- the eye notices the asymmetry even when
+  // the viewer could not name it. The timeout matches `card-out`, and it is
+  // the one number here that has to stay in step with the stylesheet.
+  // The guard reads a ref, not the state.
+  //
+  // `leaving` in a dependency array is captured by the keydown listener when
+  // it is registered, so a second Escape ran against a closure where it was
+  // still false and queued a second unmount -- four presses, four calls to
+  // onClose, the last three arriving after the card was already gone. The
+  // guard looked right and did nothing, which is the usual shape of this.
+  const dismiss = useCallback(() => {
+    if (leavingRef.current) return;
+    leavingRef.current = true;
+    setLeaving(true);
+    window.setTimeout(onClose, EXIT_MS);
+  }, [onClose]);
 
   // Escape closes, and focus moves into the dialog so a keyboard user is not
   // left tabbing through the page behind it.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") dismiss();
     };
     document.addEventListener("keydown", onKey);
     panel.current?.focus();
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [dismiss]);
+
+  // The page behind must not scroll while the card is open. A modal that lets
+  // the document move underneath it feels like a sticker rather than a layer.
+  useEffect(() => {
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, []);
 
   const summary = report.structured.sections?.find((section) => section.kind === "summary");
   const answer = summary ? trimTrailingCitations(summary.body) : null;
@@ -168,10 +206,25 @@ export function SummaryCard({
   // down the transform.
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-canvas/80 p-4 backdrop-blur-sm"
-      onClick={onClose}
+      className={`fixed inset-0 z-50 flex items-center justify-center p-4 ${
+        leaving ? "animate-backdrop-out" : "animate-backdrop-in"
+      }`}
+      onClick={dismiss}
       role="presentation"
     >
+      {/* Two layers rather than one. The wash darkens the page and the blur
+          pushes it out of focus; separating them means the blur can be strong
+          without the whole screen going black. */}
+      <div className="absolute inset-0 bg-canvas/85 backdrop-blur-md" />
+
+      {/* The bloom. A brand-coloured light behind the card, which is what makes
+          it read as lifted off the page rather than pasted onto it -- a flat
+          card on a flat backdrop has no depth for the eye to find. Kept faint:
+          this is lighting, not an effect. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute h-[36rem] w-[36rem] animate-bloom rounded-full bg-brand/[0.09] blur-[110px]"
+      />
       <div
         ref={panel}
         role="dialog"
@@ -181,9 +234,21 @@ export function SummaryCard({
         // Stops a click inside the card from reaching the backdrop and closing
         // it, which is the single most irritating modal bug there is.
         onClick={(event) => event.stopPropagation()}
-        className="w-full max-w-xl overflow-hidden rounded-2xl border border-line bg-surface shadow-2xl outline-none animate-fade-up"
+        className={`relative w-full max-w-xl overflow-hidden rounded-2xl border border-line bg-surface shadow-2xl shadow-black/40 outline-none ring-1 ring-brand/10 ${
+          leaving ? "animate-card-out" : "animate-card-in"
+        }`}
       >
-        <div className="flex items-start justify-between border-b border-line px-6 py-4">
+        {/* A hairline of brand colour along the top edge, brightest in the
+            middle. Cheap, and it is what stops the card reading as a plain
+            rectangle without adding anything a reader has to look at. */}
+        <div
+          aria-hidden
+          className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-brand/50 to-transparent"
+        />
+        <div
+          className="flex items-start justify-between border-b border-line px-6 py-4 animate-slide-in"
+          style={{ animationDelay: "60ms" }}
+        >
           <div>
             <h2 className="text-sm font-semibold tracking-tight text-ink">Summary card</h2>
             <div className="mt-1 h-0.5 w-10 rounded-full bg-brand/60" />
@@ -194,13 +259,15 @@ export function SummaryCard({
         </div>
 
         <div className="space-y-5 px-6 py-5">
-          <section>
+          <section className="animate-slide-in" style={{ animationDelay: "120ms" }}>
             <Badge letter="Q" label="Question" tone="brand" />
             <p className="mt-2 text-[15px] leading-relaxed text-ink">{detail.question}</p>
-            <div className="mt-2 h-px w-full bg-gradient-to-r from-brand/40 to-transparent" />
+            {/* Drawn rather than simply present: it reads as the card being
+                written, which is the one flourish this component gets. */}
+            <div className="mt-2 h-px w-full origin-left animate-rule bg-gradient-to-r from-brand/50 to-transparent" />
           </section>
 
-          <section>
+          <section className="animate-slide-in" style={{ animationDelay: "190ms" }}>
             <Badge letter="A" label="Answer" tone="ok" />
             {answer ? (
               <p className="mt-2 text-[15px] leading-relaxed text-muted">{answer}</p>
@@ -214,7 +281,10 @@ export function SummaryCard({
             )}
           </section>
 
-          <section className="flex flex-wrap gap-2 border-t border-line pt-4">
+          <section
+            className="flex flex-wrap gap-2 border-t border-line pt-4 animate-slide-in"
+            style={{ animationDelay: "260ms" }}
+          >
             {detail.research_type ? <Chip>{detail.research_type}</Chip> : null}
             <Chip>
               {detail.claims} {detail.claims === 1 ? "claim" : "claims"} verified
@@ -239,7 +309,7 @@ export function SummaryCard({
           <div className="flex items-center gap-2">
             <CopyButton text={asPlainText(detail, report, answer)} />
             <button
-              onClick={onClose}
+              onClick={dismiss}
               className="rounded-lg px-3 py-1.5 text-sm text-muted transition-colors hover:bg-raised hover:text-ink"
             >
               Close

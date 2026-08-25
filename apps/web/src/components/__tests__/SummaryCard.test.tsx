@@ -9,7 +9,7 @@
  * 2263px below the fold.
  */
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { SummaryCard, asPlainText, trimTrailingCitations } from "../SummaryCard";
@@ -120,13 +120,60 @@ describe("the card", () => {
     expect(screen.getByText("This run produced no summary section.")).toBeInTheDocument();
   });
 
-  it("closes on Escape", () => {
+  it("closes on Escape, after playing the exit", async () => {
+    /** Two halves, and both matter.
+     *
+     *  The card must start leaving immediately, or Escape feels ignored. And
+     *  it must not unmount until the exit animation has run, or the card
+     *  vanishes on the frame the state changes -- an animated entrance
+     *  followed by an instant disappearance reads worse than no animation at
+     *  all, because the eye notices the asymmetry even when the viewer could
+     *  not name it. */
     const onClose = vi.fn();
     render(<SummaryCard detail={detail} report={report()} onClose={onClose} />);
 
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    fireEvent.keyDown(document, { key: "Escape" });
 
-    expect(onClose).toHaveBeenCalled();
+    expect(screen.getByRole("dialog").className).toContain("animate-card-out");
+    expect(onClose).not.toHaveBeenCalled();
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("does not stack dismissals from a burst of native events", () => {
+    /** A held Escape key, dispatched the way the browser dispatches it.
+     *
+     *  Deliberately raw `dispatchEvent` rather than `fireEvent`, and that is
+     *  the whole point of the test. `fireEvent` wraps each event in `act()`,
+     *  which flushes a re-render in between, so the listener is rebuilt with
+     *  fresh state and a guard reading `leaving` from the closure appears to
+     *  work. Real key repeat does not pause for React: every event in the
+     *  burst hits the same closure, all four see `leaving === false`, and four
+     *  unmounts are queued.
+     *
+     *  Written with fireEvent first, and it passed against the broken guard.
+     */
+    const onClose = vi.fn();
+    render(<SummaryCard detail={detail} report={report()} onClose={onClose} />);
+
+    for (let i = 0; i < 4; i += 1) {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    }
+
+    return waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it("locks the page behind it and gives scrolling back", () => {
+    /** A modal the document can scroll underneath feels like a sticker rather
+     *  than a layer. */
+    const { unmount } = render(
+      <SummaryCard detail={detail} report={report()} onClose={vi.fn()} />,
+    );
+    expect(document.body.style.overflow).toBe("hidden");
+
+    unmount();
+
+    expect(document.body.style.overflow).not.toBe("hidden");
   });
 });
 
