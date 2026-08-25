@@ -118,7 +118,15 @@ class DraftSection(BaseModel):
     model_config = {"extra": "forbid"}
 
     kind: SectionKind
-    body: str = Field(max_length=6000)
+    body: str = Field(
+        max_length=6000,
+        description=(
+            "The section's prose. Cite with bracketed numbers taken from the "
+            "claims you were given -- 'Order is preserved per partition [3].' "
+            "Every substantive statement carries one, and a number you were not "
+            "given is deleted before anyone reads the report."
+        ),
+    )
     claim_ids: list[str] = Field(
         default_factory=list,
         max_length=30,

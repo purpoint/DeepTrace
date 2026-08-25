@@ -165,6 +165,25 @@ class TestEveryCitationResolves:
         assert len(citations) == 1
         assert citations[0].claim_ids == ["res_1:find_1", "res_1:find_2"]
 
+    def test_the_field_the_model_fills_asks_for_citations_too(self) -> None:
+        """The system prompt asks for bracketed numbers. The schema field the
+        model is actually filling has to ask as well.
+
+        Measured, not assumed. The first benchmark scored citation completeness
+        0/4, 1/6 and 5/5 across three runs, while every other citation metric
+        was near perfect -- the erratic pattern of a model that follows prose
+        guidance when it happens to. `body` reached the provider as a bare
+        string with a length limit and no instruction, while its own sibling
+        `claim_ids` carried one. **A schema field with nothing to say is a field
+        the model fills however it likes.**
+        """
+        from core.llm.gemini import to_gemini_schema
+
+        schema = to_gemini_schema(DraftReport.model_json_schema())
+        body = schema["properties"]["sections"]["items"]["properties"]["body"]
+
+        assert "[3]" in body.get("description", "")
+
 
 class TestNothingUnverifiedReachesTheReport:
     """The roadmap's second criterion. The generator is never shown a rejected
