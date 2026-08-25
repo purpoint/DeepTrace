@@ -28,7 +28,9 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { useReport, useResearch } from "../api/hooks";
 import type { ReportView, ResearchDetail } from "../api/types";
+import { Spinner } from "./ui";
 
 /** Strip the trailing citation run from the summary sentence.
  *
@@ -39,6 +41,63 @@ import type { ReportView, ResearchDetail } from "../api/types";
  *  sentence are left exactly where they are. */
 export function trimTrailingCitations(text: string): string {
   return text.replace(/\s*\[[\d,\s]+\]\s*\.?\s*$/, ".").trim();
+}
+
+/** The card as plain text, for pasting into notes or a chat.
+ *
+ *  Deliberately carries the support and the run id with it. A question and an
+ *  answer pasted into Slack with nothing else is the uncited answer this card
+ *  is built to avoid, only now it has escaped the product entirely and nobody
+ *  can tell where it came from. The id is what makes it traceable back. */
+export function asPlainText(
+  detail: ResearchDetail,
+  report: ReportView,
+  answer: string | null,
+): string {
+  const support = [
+    detail.research_type,
+    `${detail.claims} claims verified`,
+    `${report.citations} citations`,
+    `${detail.sources} sources`,
+    report.fully_cited ? null : "some citations unresolved",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return [
+    `Q: ${detail.question}`,
+    "",
+    `A: ${answer ?? "This run produced no summary section."}`,
+    "",
+    `— DeepTrace · ${support}`,
+    detail.research_id,
+  ].join("\n");
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+
+  const copy = async () => {
+    try {
+      // Unavailable on an insecure origin and in older browsers, so the
+      // failure is shown rather than swallowed -- a button that silently does
+      // nothing is worse than one that says it could not.
+      await navigator.clipboard.writeText(text);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+    window.setTimeout(() => setState("idle"), 2000);
+  };
+
+  return (
+    <button
+      onClick={copy}
+      className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:border-brand/40 hover:text-ink"
+    >
+      {state === "copied" ? "Copied" : state === "failed" ? "Could not copy" : "Copy"}
+    </button>
+  );
 }
 
 function Badge({ letter, label, tone }: { letter: string; label: string; tone: "brand" | "ok" }) {
@@ -177,16 +236,107 @@ export function SummaryCard({
               ? "Every citation resolves to a source in the report."
               : "Open the report to see which citations did not resolve."}
           </span>
-          <button
-            onClick={onClose}
-            className="rounded-lg px-3 py-1.5 text-sm text-muted transition-colors hover:bg-raised hover:text-ink"
-          >
-            Close
-          </button>
+          <div className="flex items-center gap-2">
+            <CopyButton text={asPlainText(detail, report, answer)} />
+            <button
+              onClick={onClose}
+              className="rounded-lg px-3 py-1.5 text-sm text-muted transition-colors hover:bg-raised hover:text-ink"
+            >
+              Close
+            </button>
+          </div>
         </div>
       </div>
     </div>,
     document.body,
+  );
+}
+
+/** The card for a run this component does not already hold, fetched on demand.
+ *
+ *  Mounted only once the card is opened, which is what makes the fetch lazy:
+ *  hooks run when their component does. The history list deliberately does not
+ *  carry summaries -- a list endpoint that ships every answer sends a megabyte
+ *  to answer "what did I ask", and most rows are never opened -- so the two
+ *  requests happen here, for the one row somebody actually pointed at.
+ */
+function LazySummaryCard({ researchId, onClose }: { researchId: string; onClose: () => void }) {
+  const detail = useResearch(researchId, { live: false });
+  const report = useReport(researchId, Boolean(detail.data?.has_report));
+
+  if (detail.isLoading || report.isLoading) {
+    return createPortal(
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-canvas/80 backdrop-blur-sm"
+        onClick={onClose}
+        role="presentation"
+      >
+        <Spinner label="Loading the summary" />
+      </div>,
+      document.body,
+    );
+  }
+
+  // A run can exist and have no report: it failed, or it was cancelled. Saying
+  // so is better than an empty card or a spinner that never resolves.
+  if (!detail.data || !report.data) {
+    return createPortal(
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-canvas/80 p-4 backdrop-blur-sm"
+        onClick={onClose}
+        role="presentation"
+      >
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={(event) => event.stopPropagation()}
+          className="w-full max-w-sm rounded-2xl border border-line bg-surface px-6 py-5 text-sm text-muted shadow-2xl"
+        >
+          This run has no report to summarise.
+          <button
+            onClick={onClose}
+            className="mt-4 block rounded-lg px-3 py-1.5 text-sm text-muted hover:bg-raised hover:text-ink"
+          >
+            Close
+          </button>
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+
+  return <SummaryCard detail={detail.data} report={report.data} onClose={onClose} />;
+}
+
+/** An affordance that opens the card for any run, fetching what it needs.
+ *
+ *  Used from the history list, where the point is to read an answer without
+ *  navigating into the run at all. */
+export function SummaryCardTrigger({
+  researchId,
+  label = "Summary",
+}: {
+  researchId: string;
+  label?: string;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <>
+      <button
+        onClick={(event) => {
+          // The row is a link. Without these the click navigates into the run,
+          // which is exactly what opening the card is meant to avoid.
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen(true);
+        }}
+        className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-brand/40 hover:text-ink"
+      >
+        {label}
+      </button>
+      {open ? <LazySummaryCard researchId={researchId} onClose={() => setOpen(false)} /> : null}
+    </>
   );
 }
 

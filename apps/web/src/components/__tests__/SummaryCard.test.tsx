@@ -9,10 +9,10 @@
  * 2263px below the fold.
  */
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { SummaryCard, trimTrailingCitations } from "../SummaryCard";
+import { SummaryCard, asPlainText, trimTrailingCitations } from "../SummaryCard";
 import type { ReportView, ResearchDetail } from "../../api/types";
 
 const detail = {
@@ -127,5 +127,59 @@ describe("the card", () => {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
 
     expect(onClose).toHaveBeenCalled();
+  });
+});
+
+describe("the plain-text form", () => {
+  it("carries the support and the run id with it", () => {
+    /** A question and an answer pasted into a chat with nothing else is the
+     *  uncited answer this card exists to avoid, except now it has escaped the
+     *  product and nobody can tell where it came from. */
+    const text = asPlainText(detail, report(), "It uses SYN, SYN-ACK, ACK.");
+
+    expect(text).toContain("Q: How does the TCP three-way handshake");
+    expect(text).toContain("A: It uses SYN, SYN-ACK, ACK.");
+    expect(text).toContain("6 claims verified");
+    expect(text).toContain("11 citations");
+    expect(text).toContain("res_abc123");
+  });
+
+  it("says when citations did not resolve", () => {
+    const text = asPlainText(detail, report({ fully_cited: false }), "Something.");
+
+    expect(text).toContain("some citations unresolved");
+  });
+
+  it("does not pretend there was an answer when there was none", () => {
+    const text = asPlainText(detail, report(), null);
+
+    expect(text).toContain("no summary section");
+  });
+});
+
+describe("copying", () => {
+  it("writes the card to the clipboard", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    render(<SummaryCard detail={detail} report={report()} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    expect(writeText).toHaveBeenCalledOnce();
+    expect(String(writeText.mock.calls[0]?.[0])).toContain("Q: How does the TCP");
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
+  });
+
+  it("says so when the clipboard refuses", async () => {
+    /** Unavailable on an insecure origin and in older browsers. A button that
+     *  silently does nothing is worse than one that admits it failed. */
+    Object.assign(navigator, {
+      clipboard: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+    });
+
+    render(<SummaryCard detail={detail} report={report()} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    expect(await screen.findByRole("button", { name: "Could not copy" })).toBeInTheDocument();
   });
 });

@@ -3,6 +3,7 @@
 import { Link } from "react-router-dom";
 
 import { useHistory } from "../api/hooks";
+import { SummaryCardTrigger } from "../components/SummaryCard";
 import { Empty, Failure, Panel, Spinner, relativeTime } from "../components/ui";
 
 const STATUS_COLOUR: Record<string, string> = {
@@ -39,11 +40,16 @@ export function History() {
                     {run.error ? ` · ${run.error.slice(0, 60)}` : ""}
                   </p>
                 </div>
-                <span
-                  className={`shrink-0 text-xs ${STATUS_COLOUR[run.status] ?? "text-faint"}`}
-                >
-                  {run.status}
-                </span>
+                <div className="flex shrink-0 items-center gap-2">
+                  {/* Only where there is something to summarise. Offering it on
+                      a failed run is offering a button that opens an apology. */}
+                  {run.status === "completed" || run.status === "partial" ? (
+                    <SummaryCardTrigger researchId={run.research_id} />
+                  ) : null}
+                  <span className={`text-xs ${STATUS_COLOUR[run.status] ?? "text-faint"}`}>
+                    {run.status}
+                  </span>
+                </div>
               </Link>
             </li>
           ))}
