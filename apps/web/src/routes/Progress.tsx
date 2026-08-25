@@ -65,6 +65,21 @@ export function ProgressView({ detail }: { detail: ResearchDetail }) {
 
   const reached = stageIndex(events);
 
+  // And again whenever the run reaches a new stage.
+  //
+  // Without this the header badge reads "queued" for the entire run while the
+  // panel below it narrates the work in real time, and the tab counts stay at
+  // whatever they were when the page loaded. The detail query does not poll --
+  // deliberately, because the socket is supposed to say when something
+  // changed -- so if nothing invalidates it, nothing ever does.
+  //
+  // Keyed on the stage rather than on the event count: a run emits dozens of
+  // events and refetching on each would put the page back to polling, only
+  // less predictably. Seven refetches over several minutes is the actual cost.
+  useEffect(() => {
+    void client.invalidateQueries({ queryKey: keys.detail(detail.research_id) });
+  }, [reached, client, detail.research_id]);
+
   return (
     <div className="space-y-4">
       <Panel

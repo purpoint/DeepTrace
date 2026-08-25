@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from redis.asyncio import Redis
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from core.config import Settings, get_settings
 from core.logging import get_logger
@@ -54,6 +55,29 @@ Long enough that a worker busy inside one slow model call is not declared dead,
 short enough that a genuinely crashed worker's job is not stranded for minutes.
 A run makes calls of a few seconds each, so a minute of silence means the
 process is gone rather than working.
+"""
+
+RESERVE_BLOCK_SECONDS = 5
+"""How long a worker blocks waiting for a job before looping.
+
+Blocking rather than spinning: a polling loop asks an idle Redis the same
+question forever.
+"""
+
+SOCKET_TIMEOUT_SECONDS = RESERVE_BLOCK_SECONDS * 2
+"""The client's read timeout, which MUST exceed the block above.
+
+This is not a tuning knob, it is a correctness constraint, and violating it cost
+a worker that could not idle. ``BLMOVE`` holds the connection open for the block
+duration and then returns nil; if the socket's read timeout expires at the same
+moment, the client raises ``TimeoutError`` instead -- and a worker whose reserve
+call raises on an empty queue dies within seconds of starting, every time,
+having done nothing wrong.
+
+redis-py applies an effective five-second read timeout when none is given, so a
+five-second block races it exactly. Measured: block=5 with no socket timeout
+raises; block=5 with a ten-second socket timeout returns None. The tests missed
+it for a year because they block for one second and production blocks for five.
 """
 
 MAX_ATTEMPTS = 3
@@ -126,7 +150,16 @@ class RedisJobQueue:
         # decode_responses=True so values come back as text. The client's type
         # stubs cannot express that, which is what _as_text and _as_hash are
         # for -- they narrow at the boundary and stay correct either way.
-        return cls(Redis.from_url(settings.redis_url, decode_responses=True), **kwargs)
+        return cls(
+            Redis.from_url(
+                settings.redis_url,
+                decode_responses=True,
+                # Strictly greater than RESERVE_BLOCK_SECONDS. See its docstring:
+                # equal is a worker that cannot idle.
+                socket_timeout=SOCKET_TIMEOUT_SECONDS,
+            ),
+            **kwargs,
+        )
 
     # -- producing ---------------------------------------------------------
 
@@ -149,14 +182,26 @@ class RedisJobQueue:
 
     # -- consuming ---------------------------------------------------------
 
-    async def reserve(self, worker: str, *, timeout: int = 5) -> Job | None:
+    async def reserve(self, worker: str, *, timeout: int = RESERVE_BLOCK_SECONDS) -> Job | None:
         """Take the next job, atomically, or return None if the queue is empty.
 
         Blocks for ``timeout`` seconds rather than spinning: a polling loop
         against Redis costs a request per interval per worker and adds latency
         equal to half the interval, and blocking has neither cost.
+
+        A read timeout here is reported as "no job", not raised. An empty queue
+        is the normal state of a worker waiting for work, and it must not be
+        able to end one -- the client is configured so this cannot happen
+        (see SOCKET_TIMEOUT_SECONDS), and this is the second line, because the
+        failure it guards against is a worker that exits silently seconds after
+        starting and leaves the queue draining into nothing.
         """
-        reserved = await self.client.blmove(PENDING, PROCESSING, timeout, "RIGHT", "LEFT")
+        try:
+            reserved = await self.client.blmove(PENDING, PROCESSING, timeout, "RIGHT", "LEFT")
+        except RedisTimeoutError:
+            log.debug("queue.reserve_timed_out", worker=worker, block_seconds=timeout)
+            return None
+
         if reserved is None:
             return None
 

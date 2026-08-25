@@ -14,17 +14,21 @@ implements them approximately proves nothing at all.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import AsyncIterator
 
 import pytest
 from redis.asyncio import Redis
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from core.config import ResearchDepth
+from core.config import ResearchDepth, Settings
 from infrastructure.queue.job import Job, JobStatus
 from infrastructure.queue.redis_queue import (
     DEAD_LETTER,
     PENDING,
     PROCESSING,
+    RESERVE_BLOCK_SECONDS,
+    SOCKET_TIMEOUT_SECONDS,
     RedisJobQueue,
 )
 
@@ -271,3 +275,66 @@ class TestTheRecord:
         depth = await queue.depth()
 
         assert depth == {"pending": 1, "processing": 1, "dead": 0}
+
+
+class TestAnIdleWorker:
+    """A worker waiting on an empty queue must simply keep waiting.
+
+    This class exists because of a bug that every other test in this file
+    walked past. `BLMOVE` holds the connection for the block duration and then
+    returns nil, and if the socket's read timeout expires at that same moment
+    the client raises instead -- so a worker's reserve call blew up on an empty
+    queue and the process exited seconds after starting, having done nothing
+    wrong and leaving the queue draining into nothing.
+
+    The reason it survived is the reason it is worth writing down: every test
+    above reserves with `timeout=1`, and production reserves with `timeout=5`.
+    redis-py applies an effective five-second read timeout when none is given,
+    so one second never raced it and five seconds always did. The tests were
+    green because they were quicker than the bug.
+    """
+
+    async def test_reserving_from_an_empty_queue_returns_none(self, queue: RedisJobQueue) -> None:
+        """At the block duration production actually uses.
+
+        Deliberately not `timeout=1`. A test that blocks for less time than the
+        real worker does is testing a case the real worker never encounters.
+        """
+        assert await queue.reserve("worker-1", timeout=RESERVE_BLOCK_SECONDS) is None
+
+    async def test_the_client_can_outwait_its_own_block(self) -> None:
+        """The invariant, asserted directly: the socket read timeout must be
+        strictly greater than the longest blocking command. Equal is the bug."""
+        assert SOCKET_TIMEOUT_SECONDS > RESERVE_BLOCK_SECONDS
+
+    async def test_a_configured_client_blocks_the_full_duration_without_raising(
+        self, queue: RedisJobQueue
+    ) -> None:
+        """End to end through a client built the way production builds one."""
+        configured = RedisJobQueue.from_settings(
+            Settings(_env_file=None, redis_url=TEST_REDIS_URL)  # type: ignore[call-arg]
+        )
+        started = time.perf_counter()
+        try:
+            result = await configured.reserve("worker-1", timeout=RESERVE_BLOCK_SECONDS)
+        finally:
+            await configured.close()
+        elapsed = time.perf_counter() - started
+
+        assert result is None
+        # It really blocked rather than returning early, which is the behaviour
+        # that makes a polling loop unnecessary.
+        assert elapsed >= RESERVE_BLOCK_SECONDS - 0.5
+
+    async def test_a_read_timeout_is_reported_as_no_job(
+        self, queue: RedisJobQueue, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The second line of defence. Even if the timeouts were ever
+        misconfigured again, an idle poll must not be able to end a worker."""
+
+        async def raise_timeout(*args: object, **kwargs: object) -> None:
+            raise RedisTimeoutError("Timeout reading from localhost:6379")
+
+        monkeypatch.setattr(queue.client, "blmove", raise_timeout)
+
+        assert await queue.reserve("worker-1", timeout=1) is None
