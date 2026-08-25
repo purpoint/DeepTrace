@@ -48,6 +48,9 @@ export interface JobView {
 
 export interface ResearchDetail extends ResearchSummary {
   normalized_question: string | null;
+  /** What the analyzer decided this question was. Null until it has been
+   *  analysed -- a run polled the moment it was submitted has no type yet. */
+  research_type: string | null;
   sources: number;
   evidence: number;
   claims: number;

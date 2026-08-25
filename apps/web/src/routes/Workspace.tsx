@@ -148,7 +148,11 @@ export function Workspace() {
       <div key={tab} className="animate-slide-in">
         {tab === "progress" ? <ProgressView detail={detail.data} /> : null}
         {tab === "report" ? (
-          <Report researchId={researchId} ready={detail.data.has_report} />
+          <Report
+            researchId={researchId}
+            ready={detail.data.has_report}
+            detail={detail.data}
+          />
         ) : null}
         {tab === "claims" ? <Claims researchId={researchId} ready={ready} /> : null}
         {tab === "evidence" ? <Evidence researchId={researchId} ready={ready} /> : null}

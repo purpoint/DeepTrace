@@ -9,8 +9,9 @@
  */
 
 import { useReport } from "../api/hooks";
-import type { Citation } from "../api/types";
+import type { Citation, ResearchDetail } from "../api/types";
 import { Markdown } from "../components/Markdown";
+import { SummaryCardButton } from "../components/SummaryCard";
 import { Reveal } from "../components/Reveal";
 import { Failure, Panel, QuoteBadge, Spinner } from "../components/ui";
 
@@ -41,7 +42,15 @@ function CitationCard({ citation }: { citation: Citation }) {
   );
 }
 
-export function Report({ researchId, ready }: { researchId: string; ready: boolean }) {
+export function Report({
+  researchId,
+  ready,
+  detail,
+}: {
+  researchId: string;
+  ready: boolean;
+  detail: ResearchDetail;
+}) {
   const report = useReport(researchId, ready);
 
   if (!ready) {
@@ -65,6 +74,13 @@ export function Report({ researchId, ready }: { researchId: string; ready: boole
 
   return (
     <div className="space-y-4">
+      {/* The short version, one click away. Placed above the document rather
+          than at the end of it: someone who wants the summary should not have
+          to scroll past the thing they were trying to avoid reading. */}
+      <div className="flex justify-end">
+        <SummaryCardButton detail={detail} report={report.data} />
+      </div>
+
       {!report.data.fully_cited ? (
         // Surfaced rather than hidden: assembly removed citations that pointed
         // at nothing, and a reader deserves to know the document was edited.

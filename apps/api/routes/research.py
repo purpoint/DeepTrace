@@ -196,6 +196,7 @@ async def get_research(
         research_id=row.id,
         question=row.question,
         normalized_question=row.normalized_question,
+        research_type=row.research_type,
         depth=row.depth,  # type: ignore[arg-type]
         status=row.status,
         created_at=row.created_at,

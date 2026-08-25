@@ -87,6 +87,17 @@ class ResearchDetail(ResearchSummary):
     normalized_question: str | None = None
     """Written by a model, from the user's question."""
 
+    research_type: str | None = Field(
+        default=None,
+        description=(
+            "What the analyzer decided this question was: comparison, "
+            "explanation, investigation, recommendation, or review. Absent "
+            "until the run has been analysed. It drives planning, so it is "
+            "worth showing -- a comparison is researched differently from an "
+            "explanation."
+        ),
+    )
+
     sources: int = 0
     evidence: int = 0
     claims: int = 0
