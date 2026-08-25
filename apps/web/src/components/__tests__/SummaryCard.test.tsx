@@ -12,7 +12,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { SummaryCard, asPlainText, trimTrailingCitations } from "../SummaryCard";
+import { SummaryCard, asPlainText, swipeOutcome, trimTrailingCitations } from "../SummaryCard";
 import type { ReportView, ResearchDetail } from "../../api/types";
 
 const detail = {
@@ -228,5 +228,57 @@ describe("copying", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy" }));
 
     expect(await screen.findByRole("button", { name: "Could not copy" })).toBeInTheDocument();
+  });
+});
+
+describe("swipe to dismiss", () => {
+  /**
+   * Tested through the decision function rather than by firing pointer events.
+   *
+   * jsdom's PointerEvent carries neither `clientY` nor `pointerType`, so
+   * dispatching one at the card exercises nothing at all. The first version of
+   * this block did exactly that, and three of its four tests passed -- they
+   * asserted the card had NOT closed, which is trivially true when the handler
+   * receives undefined coordinates. Green, and testing the absence of a
+   * feature.
+   *
+   * The React wiring is three handlers and a transform, verified in a real
+   * browser. The decisions live here.
+   */
+
+  it("dismisses on a long enough downward swipe", () => {
+    expect(
+      swipeOutcome({ pointerType: "touch", startY: 100, endY: 300, contentScrolled: false }),
+    ).toBe("dismiss");
+  });
+
+  it("springs back from a short one", () => {
+    /** A short drag is usually the start of a scroll, or a thumb resting.
+     *  Throwing the card away on either would make it feel unstable. */
+    expect(
+      swipeOutcome({ pointerType: "touch", startY: 100, endY: 140, contentScrolled: false }),
+    ).toBe("spring-back");
+  });
+
+  it("springs back from an upward swipe", () => {
+    expect(
+      swipeOutcome({ pointerType: "touch", startY: 300, endY: 100, contentScrolled: false }),
+    ).toBe("spring-back");
+  });
+
+  it("ignores a mouse drag", () => {
+    /** Touch only, so a drag across the answer selects text instead of
+     *  throwing the card away. */
+    expect(
+      swipeOutcome({ pointerType: "mouse", startY: 100, endY: 400, contentScrolled: false }),
+    ).toBe("ignore");
+  });
+
+  it("ignores a swipe that began while the answer was scrolled", () => {
+    /** The standard way this gesture is got wrong: a swipe meant to scroll a
+     *  long answer takes the whole card with it. */
+    expect(
+      swipeOutcome({ pointerType: "touch", startY: 400, endY: 700, contentScrolled: true }),
+    ).toBe("ignore");
   });
 });

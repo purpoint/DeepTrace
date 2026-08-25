@@ -31,6 +31,38 @@ import { createPortal } from "react-dom";
 import { useReport, useResearch } from "../api/hooks";
 import type { ReportView, ResearchDetail } from "../api/types";
 
+export type SwipeOutcome = "dismiss" | "spring-back" | "ignore";
+
+/** What a completed swipe should do.
+ *
+ *  Pulled out of the component and made pure, because jsdom's PointerEvent
+ *  carries neither `clientY` nor `pointerType` -- so a test that fires pointer
+ *  events at the card exercises nothing, and the three that asserted "the card
+ *  did not close" passed for the reason that nothing had happened at all.
+ *
+ *  This is the part with the decisions in it. The React wiring around it is
+ *  three handlers and a transform, and is verified in a real browser. */
+export function swipeOutcome(options: {
+  pointerType: string;
+  startY: number;
+  endY: number;
+  contentScrolled: boolean;
+}): SwipeOutcome {
+  // Touch only. A mouse drag would fight text selection, and selecting the
+  // answer to copy is a thing people do on a card built to be taken elsewhere.
+  if (options.pointerType !== "touch") return "ignore";
+  // A swipe that began while the answer was scrolled is a scroll, not a
+  // dismissal. Taking the card away there is the standard way this gesture is
+  // got wrong.
+  if (options.contentScrolled) return "ignore";
+  return options.endY - options.startY > DISMISS_PX ? "dismiss" : "spring-back";
+}
+
+const DISMISS_PX = 110;
+/* How far the card must travel before a swipe counts as a dismissal. Far
+   enough that a scroll gesture caught at the top of the content does not throw
+   it away, short enough that dismissing does not feel like work. */
+
 const EXIT_MS = 160;
 /*How long the card takes to leave. Must match the `card-out` animation in the
 Tailwind theme: shorter here and the card is torn off mid-flight, longer and it
@@ -146,6 +178,7 @@ export function SummaryCard({
   const panel = useRef<HTMLDivElement>(null);
   const [leaving, setLeaving] = useState(false);
   const leavingRef = useRef(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   // Dismissal plays the exit animation before unmounting.
   //
@@ -167,6 +200,53 @@ export function SummaryCard({
     setLeaving(true);
     window.setTimeout(onClose, EXIT_MS);
   }, [onClose]);
+
+  // Swipe down to dismiss.
+  //
+  // Touch only. A mouse drag would fight text selection in the answer, and
+  // selecting a sentence to copy is a thing people do on a card whose whole
+  // purpose is being taken elsewhere.
+  const drag = useRef<{ startY: number; scrolled: boolean } | null>(null);
+  const [offset, setOffset] = useState(0);
+
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch" || leavingRef.current) return;
+    // Only from the top of the content. Otherwise a swipe meant to scroll a
+    // long answer drags the whole card away instead, which is the standard way
+    // this gesture is got wrong.
+    const body = bodyRef.current;
+    drag.current = { startY: event.clientY, scrolled: Boolean(body && body.scrollTop > 0) };
+  };
+
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!drag.current || drag.current.scrolled) return;
+    const delta = event.clientY - drag.current.startY;
+    // Downward follows the finger; upward is heavily resisted, so the card can
+    // be nudged but never flung off the top of the screen.
+    setOffset(delta > 0 ? delta : delta / 6);
+  };
+
+  const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const started = drag.current;
+    drag.current = null;
+    if (!started) return;
+
+    // Measured from the pointer, not from React state. Reading `offset` would
+    // depend on the move's re-render having committed first, which is the same
+    // stale-state trap the dismissal guard already fell into.
+    const outcome = swipeOutcome({
+      pointerType: event.pointerType,
+      startY: started.startY,
+      endY: event.clientY,
+      contentScrolled: started.scrolled,
+    });
+
+    if (outcome === "dismiss") {
+      dismiss();
+      return;
+    }
+    setOffset(0);
+  };
 
   // Escape closes, and focus moves into the dialog so a keyboard user is not
   // left tabbing through the page behind it.
@@ -212,18 +292,28 @@ export function SummaryCard({
       onClick={dismiss}
       role="presentation"
     >
-      {/* Two layers rather than one. The wash darkens the page and the blur
-          pushes it out of focus; separating them means the blur can be strong
-          without the whole screen going black. */}
-      <div className="absolute inset-0 bg-canvas/85 backdrop-blur-md" />
+      {/* Two layers rather than one. The wash dims the page and the blur pushes
+          it out of focus; separating them means the blur can be strong without
+          the whole screen going black.
+
+          The wash is dark in BOTH themes, which is the part that was wrong.
+          Tinting it with the canvas colour meant light mode painted white over
+          white: the page behind read as bleached rather than dimmed, and a
+          white card on a white-washed page has almost no edge to find. A scrim
+          exists to push the page back, and pushing back means darker. */}
+      <div className="absolute inset-0 bg-slate-950/40 backdrop-blur-md dark:bg-canvas/85" />
 
       {/* The bloom. A brand-coloured light behind the card, which is what makes
           it read as lifted off the page rather than pasted onto it -- a flat
           card on a flat backdrop has no depth for the eye to find. Kept faint:
           this is lighting, not an effect. */}
+      {/* Stronger in light. The light palette's brand is a deep teal rather
+          than the dark palette's bright cyan, and at nine percent it simply
+          did not exist -- the effect was tuned against one theme and checked
+          in one theme. */}
       <div
         aria-hidden
-        className="pointer-events-none absolute h-[36rem] w-[36rem] animate-bloom rounded-full bg-brand/[0.09] blur-[110px]"
+        className="pointer-events-none absolute h-[36rem] w-[36rem] animate-bloom rounded-full bg-brand/20 blur-[110px] dark:bg-brand/[0.09]"
       />
       <div
         ref={panel}
@@ -234,10 +324,33 @@ export function SummaryCard({
         // Stops a click inside the card from reaching the backdrop and closing
         // it, which is the single most irritating modal bug there is.
         onClick={(event) => event.stopPropagation()}
-        className={`relative w-full max-w-xl overflow-hidden rounded-2xl border border-line bg-surface shadow-2xl shadow-black/40 outline-none ring-1 ring-brand/10 ${
-          leaving ? "animate-card-out" : "animate-card-in"
-        }`}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        style={
+          offset
+            ? {
+                // While a finger is on it the animation must not fight the
+                // transform, so the entrance is dropped for the duration.
+                transform: `translateY(${offset}px)`,
+                animation: "none",
+                // Fades as it goes, which is what tells the user the gesture is
+                // doing something before they have committed to it.
+                opacity: Math.max(0.4, 1 - offset / 400),
+              }
+            : undefined
+        }
+        className={`relative w-full max-w-xl overflow-hidden rounded-2xl border border-line bg-surface shadow-2xl shadow-slate-900/20 outline-none ring-1 ring-brand/10 transition-transform dark:shadow-black/40 ${
+          drag.current ? "duration-0" : "duration-200"
+        } ${leaving ? "animate-card-out" : "animate-card-in"}`}
       >
+        {/* The grab handle, on touch only. A swipe gesture nobody can see is a
+            gesture nobody uses. */}
+        <div
+          aria-hidden
+          className="mx-auto mt-2 h-1 w-10 rounded-full bg-line sm:hidden"
+        />
         {/* A hairline of brand colour along the top edge, brightest in the
             middle. Cheap, and it is what stops the card reading as a plain
             rectangle without adding anything a reader has to look at. */}
@@ -258,7 +371,7 @@ export function SummaryCard({
           <span className="font-mono text-[11px] text-faint">{detail.research_id}</span>
         </div>
 
-        <div className="space-y-5 px-6 py-5">
+        <div ref={bodyRef} className="max-h-[60vh] space-y-5 overflow-y-auto px-6 py-5">
           <section className="animate-slide-in" style={{ animationDelay: "120ms" }}>
             <Badge letter="Q" label="Question" tone="brand" />
             <p className="mt-2 text-[15px] leading-relaxed text-ink">{detail.question}</p>
