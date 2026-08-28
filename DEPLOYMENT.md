@@ -98,8 +98,21 @@ user, inherited by every child process the container ever spawns, and dumped
 verbatim by a surprising number of crash handlers. None of that is a flaw in
 this application; all of it is a way this application's keys leave it.
 
-A file is read once, by the process that opens it, and Docker mounts it from a
-read-only tmpfs that never touches the host disk.
+A file is read once, by the process that opens it, and by nothing else.
+
+Be precise about what Compose does here, because the usual claim is wrong for
+this setup: a `secrets:` entry with `file:` is **bind-mounted from the host**,
+not materialised in a tmpfs. That is a Swarm behaviour. These secrets are
+ordinary files on the deployment host, and their permissions are the ones that
+matter.
+
+Which is why `make secrets` writes them 0644 inside a 0700 directory, rather
+than the 0600 that looks stricter. The application container runs as uid 10001;
+a 0600 file owned by the deploying user is unreadable to it, and the container
+refuses to start saying it cannot read a secret that is sitting right there.
+**The directory is the boundary.** No other user on the host can traverse into
+it, and the container reaches the file through its own mount without ever
+walking that path.
 
 Any setting can arrive this way — append `_FILE` and give a path:
 

@@ -64,8 +64,9 @@ class FileSecretsSource(PydanticBaseSettingsSource):
     ones spawned to run something unrelated, and it is dumped verbatim by a
     surprising number of crash handlers. None of that is a vulnerability in this
     application; all of it is a way this application's keys leave it. A file is
-    read once, by the one process that opens it, and Docker mounts secrets from
-    a read-only tmpfs that never touches the host disk.
+    read once, by the one process that opens it, and by nothing else -- it is
+    not inherited, not enumerable, and not printed by anything that inspects the
+    container.
 
     This is the convention the ``postgres`` image in this stack already uses
     (``POSTGRES_PASSWORD_FILE``), so the compose file speaks one idiom rather

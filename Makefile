@@ -110,7 +110,16 @@ secrets: ## Generate deploy/secrets/* for the deployment overlay
 		"$$(cat deploy/secrets/postgres_password)" \
 		"$${POSTGRES_DB:-deeptrace}" > deploy/secrets/database_url
 	@touch deploy/secrets/google_api_key deploy/secrets/tavily_api_key
-	@chmod 600 deploy/secrets/*
+	# The directory is the boundary, not the file mode. `chmod 600` here looks
+	# stricter and is actually broken: compose bind-mounts these files, the
+	# application container runs as uid 10001, and a file owned by the deploying
+	# user with mode 600 is unreadable to it -- the container refuses to start,
+	# correctly, saying it cannot read a secret that is right there. 0700 on the
+	# directory stops every other user on the host from traversing into it,
+	# which is the protection that was wanted; the container reaches the file
+	# through its own mount and never walks that path.
+	@chmod 700 deploy/secrets
+	@chmod 644 deploy/secrets/*
 	@echo "Wrote deploy/secrets/. The database URL is built from the password file,"
 	@echo "so the two cannot disagree -- do not edit either by hand."
 	@echo
@@ -125,7 +134,8 @@ tls-cert: ## Generate a self-signed certificate for verifying the TLS stack
 		-out deploy/certs/fullchain.pem \
 		-subj "/CN=$${TLS_HOST:-localhost}" \
 		-addext "subjectAltName=DNS:$${TLS_HOST:-localhost}"
-	@chmod 600 deploy/certs/privkey.pem
+	@chmod 700 deploy/certs
+	@chmod 644 deploy/certs/privkey.pem
 	@echo
 	@echo "Self-signed, and only good for proving the stack terminates TLS."
 	@echo "A browser will refuse it, correctly. A real deployment replaces both"
