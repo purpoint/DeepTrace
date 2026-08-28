@@ -221,3 +221,44 @@ jobs:
           user=$(docker run --rm deeptrace:ci id -un)
           echo "image runs as: $user"
           test "$user" != "root"
+
+      - name: The deployment overlay resolves
+        # The overlay swaps every secret for a mounted file and adds TLS. It is
+        # a second compose file, so it is a second thing that can fail to parse
+        # -- and the failure would land on the one deployment nobody runs
+        # locally.
+        run: |
+          make secrets
+          make tls-cert
+          docker compose -f docker-compose.yml -f docker-compose.deploy.yml config --quiet
+
+      - name: Both nginx configurations parse
+        # There is no nginx on the development machine, so this is the first
+        # time either file is read by the program that has to read it. The
+        # plain one is baked into the image; the TLS one is mounted over it the
+        # way the overlay does, against the self-signed certificate generated
+        # above -- nginx -t opens the certificate and key, so a config that
+        # names them wrongly fails here rather than at deploy.
+        run: |
+          docker run --rm deeptrace-web:ci nginx -t
+          docker run --rm \
+            -v "$PWD/apps/web/nginx.tls.conf:/etc/nginx/conf.d/default.conf:ro" \
+            -v "$PWD/deploy/certs:/etc/nginx/certs:ro" \
+            deeptrace-web:ci nginx -t
+
+      - name: A secret file reaches the application as a secret
+        # The end-to-end claim of the overlay, checked rather than asserted:
+        # given a path and no environment variable, the settings object holds
+        # the file's contents, without its trailing newline.
+        run: |
+          docker run --rm \
+            -v "$PWD/deploy/secrets:/run/secrets:ro" \
+            -e JWT_SECRET_FILE=/run/secrets/jwt_secret \
+            deeptrace:ci python -c "
+          from core.config import Settings
+          from pathlib import Path
+          s = Settings(_env_file=None)
+          assert s.jwt_secret == Path('/run/secrets/jwt_secret').read_text().rstrip('\n')
+          assert s.jwt_secret and '\n' not in s.jwt_secret
+          print('secret read from file, length', len(s.jwt_secret))
+          "

@@ -8,19 +8,130 @@ inside a research run.
 Secrets are never given defaults. A default API key would let the application
 start in a broken state and fail later at the first LLM call, which is a far
 worse failure mode than refusing to start.
+
+Secrets may also arrive from *files* rather than the environment -- see
+:class:`FileSecretsSource`, which is what a deployed instance uses.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic.fields import FieldInfo
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+FILE_SUFFIX = "_FILE"
+"""Environment-variable suffix naming a file to read a setting from.
+
+``JWT_SECRET_FILE=/run/secrets/jwt_secret`` rather than ``JWT_SECRET=...``.
+"""
+
+
+PRODUCTION_REQUIRED = {
+    "jwt_secret": "no signing key: every sign-in and every stream ticket fails",
+    "database_url": "no database: nothing a run produces is kept",
+    "google_api_key": "no model provider: every research run fails at the first agent",
+    "tavily_api_key": "no search provider: every research run fails at the first query",
+}
+"""What a production deployment cannot run without, and why each one is on the
+list rather than left to fail at the point of use."""
+
+
+class SecretFileError(RuntimeError):
+    """Raised when a ``*_FILE`` variable cannot be honoured.
+
+    Never carries the file's contents -- only its path. An exception message is
+    the least controlled string in a program: it reaches logs, crash reporters
+    and error pages, which is exactly the journey a secret must not make.
+    """
+
+
+class FileSecretsSource(PydanticBaseSettingsSource):
+    """Read settings from files named by ``<FIELD>_FILE`` environment variables.
+
+    **Why a file beats an environment variable for a secret.** An environment
+    variable is readable by anything that can see the process: ``docker
+    inspect`` prints it, ``/proc/<pid>/environ`` exposes it to any process
+    running as the same user, it is inherited by every child process including
+    ones spawned to run something unrelated, and it is dumped verbatim by a
+    surprising number of crash handlers. None of that is a vulnerability in this
+    application; all of it is a way this application's keys leave it. A file is
+    read once, by the one process that opens it, and Docker mounts secrets from
+    a read-only tmpfs that never touches the host disk.
+
+    This is the convention the ``postgres`` image in this stack already uses
+    (``POSTGRES_PASSWORD_FILE``), so the compose file speaks one idiom rather
+    than two.
+
+    Three behaviours are deliberate, and each one is a failure that would
+    otherwise be silent:
+
+    *A trailing newline is stripped.* Secret files are written with ``echo`` and
+    by every secret manager in existence, so almost all of them end in ``\\n``.
+    A signing key with a stray newline is simply a different key, and the
+    symptom is that tokens minted before a redeploy stop verifying -- which
+    reads as a session bug, not a configuration one.
+
+    *Naming both forms is an error.* An operator moving a deployment from
+    environment variables to files will, at some point, have both set. Quietly
+    preferring one means they believe they have rotated a credential that is
+    still the old one.
+
+    *An unreadable file is an error.* Falling back to "unset" would let the
+    application start without the secret it was explicitly told where to find,
+    and `require()` would then blame a variable the operator did set.
+    """
+
+    def __init__(self, settings_cls: type[BaseSettings], environ: dict[str, str] | None = None):
+        super().__init__(settings_cls)
+        self._environ = os.environ if environ is None else environ
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        # Everything is resolved in __call__, which needs to see all the
+        # variables at once to detect a field named both ways.
+        raise NotImplementedError
+
+    def __call__(self) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for field_name in self.settings_cls.model_fields:
+            variable = f"{field_name.upper()}{FILE_SUFFIX}"
+            path = self._environ.get(variable)
+            if not path:
+                continue
+
+            if self._environ.get(field_name.upper()):
+                raise SecretFileError(
+                    f"Both {field_name.upper()} and {variable} are set. "
+                    f"Remove one -- with both present it is not possible to tell "
+                    f"which value the application is actually using."
+                )
+
+            try:
+                content = Path(path).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise SecretFileError(
+                    f"{variable} points at {path!r}, which could not be read: "
+                    f"{exc.strerror or exc}. A secret file that is named must exist; "
+                    f"starting without it would look like the variable was never set."
+                ) from None
+
+            # rstrip rather than strip: leading whitespace in a secret is
+            # unusual enough that removing it might change a legitimate value,
+            # while a trailing newline is an artefact of how the file was
+            # written in essentially every case.
+            values[field_name] = content.rstrip("\r\n")
+        return values
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}()"
 
 
 class Environment(StrEnum):
@@ -100,6 +211,32 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Insert file-backed secrets above the environment.
+
+        Ordered above ``env_settings`` so that a deployment which has been moved
+        onto files is not silently served by a stale variable left in a shell
+        profile. In practice the two never both win, because naming a setting
+        both ways is an error -- the ordering decides what happens with ``.env``,
+        which is a local-development convenience and should lose to an explicit
+        file every time.
+        """
+        return (
+            init_settings,
+            FileSecretsSource(settings_cls),
+            env_settings,
+            dotenv_settings,
+            file_secret_settings,
+        )
 
     # -- Application -------------------------------------------------------
     app_env: Environment = Environment.LOCAL
@@ -292,6 +429,41 @@ class Settings(BaseSettings):
             valid = "DEBUG, INFO, WARNING, ERROR, CRITICAL"
             raise ValueError(f"log_level must be one of: {valid}. Got: {value!r}")
         return level
+
+    @model_validator(mode="after")
+    def _production_has_its_credentials(self) -> Settings:
+        """Refuse to start a production instance that is missing a credential.
+
+        Deliberately here rather than in the compose file. `${VAR:?message}`
+        guards exactly one way of starting the application, checks only that a
+        string is non-empty, and is invisible to the test suite -- and it cannot
+        coexist with secrets supplied as files, because compose interpolates each
+        file before merging any overlay, so a base file demanding an environment
+        variable demands it even from a deployment that has deliberately replaced
+        it with a mounted file.
+
+        Stated as a property of the application instead, it holds for compose,
+        for Kubernetes, for a systemd unit and for a shell, and it is a unit
+        test rather than a thing someone notices in YAML.
+
+        Everything is reported at once. A deployment missing three credentials
+        should learn that in one restart rather than three.
+        """
+        if self.app_env is not Environment.PRODUCTION:
+            return self
+
+        missing = [name for name in PRODUCTION_REQUIRED if not getattr(self, name, None)]
+        if missing:
+            detail = "\n".join(
+                f"  - {name.upper()}: {PRODUCTION_REQUIRED[name]}" for name in missing
+            )
+            raise ValueError(
+                f"APP_ENV is production but {len(missing)} required credential(s) are missing:\n"
+                f"{detail}\n"
+                f"Set each as an environment variable, or as a file with "
+                f"<NAME>{FILE_SUFFIX} pointing at it."
+            )
+        return self
 
     @property
     def is_production(self) -> bool:

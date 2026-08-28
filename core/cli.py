@@ -869,6 +869,17 @@ def _serve(args: argparse.Namespace) -> int:
     built inside the server's process. With ``--reload`` that matters: the
     reloader re-imports the module, and an app constructed at import time would
     open a second database pool on every code change.
+
+    ``--forwarded-allow-ips`` is what makes the rate limiter work behind a
+    proxy. `client_identity` counts against the socket's peer address, which
+    behind nginx is nginx -- one bucket for every client on the internet. With
+    this set, uvicorn rewrites the peer address from ``X-Forwarded-For``, but
+    *only* for connections arriving from the addresses named here.
+
+    It is off unless asked for, and it is never ``*`` by default. Trusting the
+    header unconditionally is worse than not reading it at all: a client that
+    can choose its own forwarded address gets a fresh rate-limit bucket on every
+    request, so the limiter would report itself working while counting nothing.
     """
     import uvicorn
 
@@ -878,6 +889,8 @@ def _serve(args: argparse.Namespace) -> int:
         host=args.host,
         port=args.port,
         reload=args.reload,
+        proxy_headers=bool(args.forwarded_allow_ips),
+        forwarded_allow_ips=args.forwarded_allow_ips,
         log_config=None,  # the application configures structured logging itself
     )
     return 0
@@ -1017,6 +1030,15 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument(
         "--reload", action="store_true", help="Restart on code changes, for development"
+    )
+    serve.add_argument(
+        "--forwarded-allow-ips",
+        default=None,
+        help=(
+            "Trust X-Forwarded-* from these addresses or CIDR networks. "
+            "Set it to the reverse proxy and nothing else -- '*' lets any "
+            "client claim any address, which un-does the rate limiter."
+        ),
     )
 
     jobs = subcommands.add_parser("jobs", help="Show a job, or the queue's depth")

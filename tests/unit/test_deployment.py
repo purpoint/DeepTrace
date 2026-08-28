@@ -26,9 +26,29 @@ CONTAINER_ONLY = {"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"}
 """Variables the postgres image reads, which are not application settings."""
 
 
+SERVER_FILES = ("nginx.conf", "nginx.tls.conf")
+"""The two nginx entry points: plain HTTP locally and in CI, TLS in a
+deployment. Both include the same two snippets."""
+
+
 @pytest.fixture(scope="module")
 def compose() -> dict:
     return yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+
+
+@pytest.fixture(scope="module")
+def deploy_compose() -> dict:
+    return yaml.safe_load((ROOT / "docker-compose.deploy.yml").read_text())
+
+
+@pytest.fixture(scope="module")
+def app_snippet() -> str:
+    return (ROOT / "apps/web/snippets/app.conf").read_text()
+
+
+@pytest.fixture(scope="module")
+def headers_snippet() -> str:
+    return (ROOT / "apps/web/snippets/security-headers.conf").read_text()
 
 
 class TestTheComposeFile:
@@ -98,14 +118,109 @@ class TestExposure:
 
         assert published == {"web"}
 
-    def test_secrets_have_no_defaults(self, compose: dict) -> None:
-        """`${VAR:?message}` fails the stack with an explanation. `${VAR:-x}`
-        would start it with a shared signing key, which is worse than not
-        starting."""
+    def test_no_secret_has_a_baked_in_default(self, compose: dict) -> None:
+        """`${VAR:-something}` would start the stack with a signing key every
+        deployment shares, which is worse than not starting.
+
+        Empty is allowed, and the `${VAR:?}` guard that used to be here is not.
+        It could only guard one way of starting the application, and compose
+        interpolates each file before merging an overlay -- so requiring the
+        variable here would also require it from a deployment that has replaced
+        it with a mounted file. The requirement moved into Settings, where it
+        covers every deployment method and is a test rather than a convention;
+        see `TestProductionRefusesToStartWithoutCredentials` in test_config.
+        """
         environment = compose["services"]["api"]["environment"]
 
         for name in ("JWT_SECRET", "GOOGLE_API_KEY", "TAVILY_API_KEY"):
-            assert ":?" in str(environment[name]), name
+            value = str(environment[name])
+            assert value.endswith(":-}"), f"{name} is {value!r}, which is not an empty default"
+
+
+class TestTheDeploymentOverlay:
+    """The overlay that turns the stack into something exposable: TLS at the
+    edge, and every secret read from a file rather than the environment."""
+
+    def test_every_secret_is_supplied_as_a_file(self, deploy_compose: dict) -> None:
+        api = deploy_compose["services"]["api"]["environment"]
+
+        for name in ("JWT_SECRET", "GOOGLE_API_KEY", "TAVILY_API_KEY", "DATABASE_URL"):
+            assert api[f"{name}_FILE"], f"{name} has no file"
+            # Present and null: compose passes it through from the host, where
+            # it is unset. Naming a secret both ways is a startup error, so the
+            # plain form must not carry a value here.
+            assert api[name] is None, f"{name} still carries a value"
+
+    def test_every_named_secret_is_declared(self, deploy_compose: dict) -> None:
+        """A service referencing a secret the file does not define is a compose
+        error at `up`, which is late for something a parser can see."""
+        declared = set(deploy_compose["secrets"])
+
+        for name, service in deploy_compose["services"].items():
+            for used in service.get("secrets") or []:
+                assert used in declared, f"{name} uses undeclared secret {used}"
+
+    def test_every_declared_secret_is_used(self, deploy_compose: dict) -> None:
+        """The mirror. An unused declaration is a file somebody is maintaining
+        for nothing, or a mount that was meant to be wired and was not."""
+        used = {
+            name
+            for service in deploy_compose["services"].values()
+            for name in (service.get("secrets") or [])
+        }
+
+        assert set(deploy_compose["secrets"]) == used
+
+    def test_the_secret_file_paths_match_where_compose_mounts_them(
+        self, deploy_compose: dict
+    ) -> None:
+        """Compose mounts a secret at /run/secrets/<name>. A *_FILE pointing
+        anywhere else names a path that will not exist, and the application
+        refuses to start rather than starting without the credential -- correct,
+        but a confusing way to learn about a typo."""
+        for service in deploy_compose["services"].values():
+            environment = service.get("environment") or {}
+            declared = set(service.get("secrets") or [])
+            for key, value in environment.items():
+                if not key.endswith("_FILE") or value is None:
+                    continue
+                assert str(value).startswith("/run/secrets/"), value
+                assert Path(str(value)).name in declared, f"{value} is not mounted here"
+
+    def test_the_api_trusts_only_the_compose_subnet_for_forwarded_headers(
+        self, deploy_compose: dict
+    ) -> None:
+        """`*` would let any client claim any address and get a fresh
+        rate-limit bucket per request, which is not a rate limit."""
+        command = deploy_compose["services"]["api"]["command"]
+        trusted = command[command.index("--forwarded-allow-ips") + 1]
+
+        assert trusted != "*"
+        subnet = deploy_compose["networks"]["default"]["ipam"]["config"][0]["subnet"]
+        assert trusted == subnet
+
+    def test_the_edge_publishes_both_ports(self, deploy_compose: dict) -> None:
+        """8443 serves, and 8080 exists only to redirect to it. Closing 8080
+        would leave a client that typed the bare hostname with a refused
+        connection rather than a working link."""
+        ports = " ".join(deploy_compose["services"]["web"]["ports"])
+
+        assert ":8443" in ports
+        assert ":8080" in ports
+
+    def test_certificates_are_mounted_read_only(self, deploy_compose: dict) -> None:
+        mounts = deploy_compose["services"]["web"]["volumes"]
+
+        certs = [m for m in mounts if "/etc/nginx/certs" in m]
+        assert certs and all(m.endswith(":ro") for m in certs)
+
+    def test_secrets_and_certificates_are_not_committed(self) -> None:
+        """The one mistake in this milestone that cannot be undone by a later
+        commit: git remembers."""
+        ignore = (ROOT / ".gitignore").read_text()
+
+        assert "deploy/secrets/*" in ignore
+        assert "deploy/certs/*" in ignore
 
 
 class TestNamesThatMustMatchSomethingReal:
@@ -148,28 +263,126 @@ class TestNamesThatMustMatchSomethingReal:
 
 
 class TestTheProxy:
-    def test_the_websocket_upgrade_is_configured(self) -> None:
+    """The proxy rules live in one snippet included by both server files.
+
+    They were duplicated until the TLS file existed, at which point two copies
+    had to stay in step by hand -- and the thing they govern, a WebSocket that
+    only breaks under TLS, is exactly the kind of difference nobody notices
+    until a deployment.
+    """
+
+    def test_the_websocket_upgrade_is_configured(self, app_snippet: str) -> None:
         """Without these headers the progress stream fails at the handshake
         while every other endpoint works perfectly -- a spinner that never
         moves, and nothing in the API logs to explain it."""
-        config = (ROOT / "apps/web/nginx.conf").read_text()
+        assert "proxy_http_version 1.1" in app_snippet
+        assert "proxy_set_header Upgrade $http_upgrade" in app_snippet
+        assert 'proxy_set_header Connection "upgrade"' in app_snippet
 
-        assert "proxy_http_version 1.1" in config
-        assert "proxy_set_header Upgrade $http_upgrade" in config
-        assert 'proxy_set_header Connection "upgrade"' in config
-
-    def test_the_read_timeout_outlives_a_research_run(self) -> None:
+    def test_the_read_timeout_outlives_a_research_run(self, app_snippet: str) -> None:
         """nginx defaults to sixty seconds. A run is quiet for far longer than
         that between model calls, so the default closes a healthy stream."""
-        config = (ROOT / "apps/web/nginx.conf").read_text()
-        timeout = re.search(r"proxy_read_timeout (\d+)s", config)
+        timeout = re.search(r"proxy_read_timeout (\d+)s", app_snippet)
 
         assert timeout is not None
         assert int(timeout.group(1)) >= 600
 
-    def test_client_routes_fall_back_to_the_app(self) -> None:
+    def test_client_routes_fall_back_to_the_app(self, app_snippet: str) -> None:
         """Reloading /research/res_abc is a client route, not a missing file."""
-        assert "try_files $uri $uri/ /index.html" in (ROOT / "apps/web/nginx.conf").read_text()
+        assert "try_files $uri $uri/ /index.html" in app_snippet
+
+    @pytest.mark.parametrize("server_file", SERVER_FILES)
+    def test_both_server_files_include_the_shared_rules(self, server_file: str) -> None:
+        """The plain and TLS files must serve the same application. Sharing the
+        snippet is what makes that true by construction rather than by review."""
+        config = (ROOT / "apps/web" / server_file).read_text()
+
+        assert "include /etc/nginx/snippets/app.conf;" in config
+        assert "include /etc/nginx/snippets/security-headers.conf;" in config
+
+
+class TestSecurityHeadersReachEveryResponse:
+    """nginx inherits `add_header` from an outer level *only* when the current
+    level defines none of its own.
+
+    That rule cost this configuration its content-security policy on every
+    script and stylesheet it serves: `location /assets/` set Cache-Control, and
+    silently dropped four security headers it never mentioned. The server block
+    still listed them, so nothing read as wrong.
+    """
+
+    def test_every_location_that_sets_a_header_re_includes_them(self, app_snippet: str) -> None:
+        blocks = re.split(r"\nlocation ", app_snippet)
+
+        for block in blocks[1:]:
+            name = block.split("{")[0].strip()
+            if "add_header" not in block:
+                continue  # inherits from the server level, which is correct
+            assert "include /etc/nginx/snippets/security-headers.conf;" in block, (
+                f"location {name} sets add_header, so nginx stops inheriting the "
+                f"security headers -- it must include them itself"
+            )
+
+    def test_the_policy_is_actually_restrictive(self, headers_snippet: str) -> None:
+        assert "default-src 'self'" in headers_snippet
+        assert "frame-ancestors 'none'" in headers_snippet
+        # The one place 'unsafe-inline' is allowed, and only for styles.
+        assert "script-src 'self';" in headers_snippet
+
+
+class TestTls:
+    def test_plain_http_only_redirects(self) -> None:
+        """A stack that answers on both schemes is one where a client that
+        forgot the scheme keeps working, so nobody finds out the credential
+        travelled in clear."""
+        config = (ROOT / "apps/web/nginx.tls.conf").read_text()
+        plain = config.split("listen 8080;")[1].split("server {")[0]
+
+        assert "return 301 https://$host$request_uri;" in plain
+        assert "proxy_pass" not in plain
+
+    def test_only_modern_tls_is_negotiable(self) -> None:
+        config = (ROOT / "apps/web/nginx.tls.conf").read_text()
+
+        assert "ssl_protocols TLSv1.2 TLSv1.3;" in config
+        assert "TLSv1.1" not in config
+        assert "TLSv1 " not in config
+
+    def test_session_tickets_are_off(self) -> None:
+        """nginx generates the ticket key at start and never rotates it, so a
+        ticket recovered later decrypts a session recorded earlier."""
+        assert "ssl_session_tickets off;" in (ROOT / "apps/web/nginx.tls.conf").read_text()
+
+    def test_hsts_is_sent_only_over_tls(self) -> None:
+        """The header is emitted from $hsts_header, which each server file maps
+        from the scheme. Over plain HTTP it is the empty string, and nginx omits
+        an add_header with an empty value."""
+        assert "$hsts_header" in (ROOT / "apps/web/snippets/security-headers.conf").read_text()
+
+        plain = (ROOT / "apps/web/nginx.conf").read_text()
+        assert "map $scheme $hsts_header" in plain
+        assert "max-age" not in plain
+
+        tls = (ROOT / "apps/web/nginx.tls.conf").read_text()
+        assert re.search(r"https\s+\"max-age=\d+", tls) is not None
+
+    def test_hsts_does_not_preload(self) -> None:
+        """Preload is a submission to a list compiled into browser binaries,
+        and getting off it takes months. Right end state, wrong thing to enable
+        in the commit that first serves a certificate."""
+        tls = (ROOT / "apps/web/nginx.tls.conf").read_text()
+        value = re.search(r'https\s+"(max-age=[^"]*)"', tls)
+
+        assert value is not None
+        assert "preload" not in value.group(1)
+
+    def test_the_image_ships_both_server_files_and_the_snippets(self) -> None:
+        """The TLS file is mounted over the default at deploy time, but it is
+        built into the image so what gets promoted is what was tested."""
+        dockerfile = (ROOT / "apps/web/Dockerfile").read_text()
+
+        assert "COPY snippets/ /etc/nginx/snippets/" in dockerfile
+        assert "nginx.tls.conf" in dockerfile
 
 
 class TestTheWorkflow:
@@ -231,6 +444,27 @@ class TestTheWorkflow:
 
         assert "not-a-real-key" in env["GOOGLE_API_KEY"]
         assert "not-a-real-key" in env["TAVILY_API_KEY"]
+
+    def test_ci_parses_both_nginx_configurations(self, workflow: dict) -> None:
+        """There is no nginx on this machine, so this CI step is the only thing
+        that ever reads either file with the program that has to read it.
+        Deleting it would leave the TLS configuration unverified while the suite
+        stayed green, which is the failure mode this whole test file exists for.
+        """
+        steps = workflow["jobs"]["images"]["steps"]
+        run = "\n".join(str(step.get("run", "")) for step in steps)
+
+        assert "nginx -t" in run
+        assert "nginx.tls.conf" in run
+        # Against a real certificate: nginx -t opens the key, so a config that
+        # names it wrongly passes a syntax check and fails at deploy.
+        assert "deploy/certs" in run
+
+    def test_ci_resolves_the_deployment_overlay(self, workflow: dict) -> None:
+        steps = workflow["jobs"]["images"]["steps"]
+        run = "\n".join(str(step.get("run", "")) for step in steps)
+
+        assert "docker-compose.deploy.yml config" in run
 
     def test_images_are_built_but_never_pushed(self, workflow: dict) -> None:
         """Proving an image builds needs no credentials. Publishing one does,

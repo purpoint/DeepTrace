@@ -100,8 +100,14 @@ Built sequentially. This table reflects what actually works, not what is planned
 | J | Evaluation, observability, optimization | ⬜ |
 | K | Docker, CI/CD, deployment, docs | ⬜ |
 
-Performance and cost figures will be published here once measured in Phase J. No
-benchmark numbers are claimed before they are recorded.
+Phase J has numbers for 3 of its 24 benchmark questions -- see
+[EVALUATION.md](EVALUATION.md), which states that denominator beside every
+figure. The free tier allows 20 model requests a day and a question spends
+three, so the rest is a matter of days rather than of code. No benchmark number
+is claimed before it is recorded.
+
+Running it in containers, with TLS and file-based secrets, is in
+[DEPLOYMENT.md](DEPLOYMENT.md).
 
 ---
 

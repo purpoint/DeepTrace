@@ -21,7 +21,7 @@ services:
     image: postgres:15-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-deeptrace}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       POSTGRES_DB: ${POSTGRES_DB:-deeptrace}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -80,14 +80,19 @@ services:
     environment: &app_env
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-deeptrace}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-deeptrace}
       REDIS_URL: redis://redis:6379/0
-      # Required, and deliberately without a default. A signing key with a
-      # default is a signing key every deployment shares.
-      # Quoted, because the message contains a colon-space and YAML would
-      # otherwise read it as a nested mapping -- a compose file that does not
-      # parse at all.
-      JWT_SECRET: "${JWT_SECRET:?set JWT_SECRET to at least 32 characters}"
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:?GOOGLE_API_KEY must be set}
-      TAVILY_API_KEY: ${TAVILY_API_KEY:?TAVILY_API_KEY must be set}
+      # No default, and no `${VAR:?}` guard either. The guard was moved into
+      # Settings, which refuses to start a production instance missing any of
+      # these and names all of them at once -- see _production_has_its_credentials.
+      #
+      # It had to move. Compose interpolates each file *before* merging an
+      # overlay, so a `:?` here is demanded even from a deployment that has
+      # replaced the variable with a mounted secret file. Requiring an
+      # environment variable is also not the same check: it tests that a string
+      # is non-empty, in one of the several ways this application can be
+      # started, where nothing can test it.
+      JWT_SECRET: ${JWT_SECRET:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       APP_ENV: ${APP_ENV:-production}
       JSON_LOGS: ${JSON_LOGS:-true}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

@@ -7,18 +7,30 @@ internally consistent.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from core.config import (
     DEPTH_BUDGETS,
+    PRODUCTION_REQUIRED,
     Environment,
     MissingConfigurationError,
     ResearchDepth,
+    SecretFileError,
     Settings,
     get_settings,
 )
 
 pytestmark = pytest.mark.unit
+
+PRODUCTION_CREDENTIALS = {
+    "JWT_SECRET": "k" * 40,
+    "DATABASE_URL": "postgresql+asyncpg://u:p@db:5432/deeptrace",
+    "GOOGLE_API_KEY": "google-key",
+    "TAVILY_API_KEY": "tvly-key",
+}
+"""The set a production instance refuses to start without."""
 
 
 class TestDefaults:
@@ -130,6 +142,10 @@ class TestEnvironmentOverrides:
     def test_env_var_overrides_default(self, isolated_env: pytest.MonkeyPatch) -> None:
         isolated_env.setenv("APP_ENV", "production")
         isolated_env.setenv("OPENAI_API_KEY", "sk-from-environment")
+        # Production refuses to start without these; supplied so this test
+        # stays about the override it is named for.
+        for name, value in PRODUCTION_CREDENTIALS.items():
+            isolated_env.setenv(name, value)
 
         configured = Settings(_env_file=None)
 
@@ -151,3 +167,159 @@ class TestSettingsCache:
         first = get_settings()
         get_settings.cache_clear()
         assert get_settings() is not first
+
+
+class TestSecretsFromFiles:
+    """A deployed instance is given paths, not values.
+
+    An environment variable is readable by `docker inspect`, by anything that
+    can open /proc/<pid>/environ, and by every child process the container ever
+    spawns. None of that is a flaw in this application; all of it is a way this
+    application's keys leave it.
+    """
+
+    def test_a_secret_is_read_from_the_file_it_names(
+        self, isolated_env: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        secret = tmp_path / "jwt_secret"
+        secret.write_text("a" * 40)
+        isolated_env.setenv("JWT_SECRET_FILE", str(secret))
+
+        assert Settings(_env_file=None).jwt_secret == "a" * 40
+
+    def test_a_trailing_newline_is_not_part_of_the_secret(
+        self, isolated_env: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Every secret manager and every `echo` writes one. A signing key with
+        a stray newline is a different key, and the symptom is that tokens
+        minted before a redeploy stop verifying -- which reads as a session bug
+        rather than a configuration one."""
+        secret = tmp_path / "jwt_secret"
+        secret.write_text("a" * 40 + "\n")
+        isolated_env.setenv("JWT_SECRET_FILE", str(secret))
+
+        assert Settings(_env_file=None).jwt_secret == "a" * 40
+
+    def test_naming_a_secret_both_ways_is_an_error(
+        self, isolated_env: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An operator migrating from variables to files will have both set at
+        some point. Quietly preferring one means they believe they have rotated
+        a credential that is still the old one."""
+        secret = tmp_path / "jwt_secret"
+        secret.write_text("a" * 40)
+        isolated_env.setenv("JWT_SECRET_FILE", str(secret))
+        isolated_env.setenv("JWT_SECRET", "b" * 40)
+
+        with pytest.raises(SecretFileError, match="Both JWT_SECRET and JWT_SECRET_FILE"):
+            Settings(_env_file=None)
+
+    def test_a_missing_file_is_an_error_rather_than_an_unset_value(
+        self, isolated_env: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Falling back to unset would start the application without the secret
+        it was told where to find, and blame a variable the operator did set."""
+        isolated_env.setenv("JWT_SECRET_FILE", str(tmp_path / "absent"))
+
+        with pytest.raises(SecretFileError, match="could not be read"):
+            Settings(_env_file=None)
+
+    def test_the_error_never_contains_the_secret(
+        self, isolated_env: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An exception message reaches logs, crash reporters and error pages,
+        which is exactly the journey a secret must not make."""
+        secret = tmp_path / "jwt_secret"
+        secret.write_text("super-secret-value-nobody-should-ever-see")
+        isolated_env.setenv("JWT_SECRET_FILE", str(secret))
+        isolated_env.setenv("JWT_SECRET", "b" * 40)
+
+        with pytest.raises(SecretFileError) as caught:
+            Settings(_env_file=None)
+
+        assert "super-secret-value" not in str(caught.value)
+
+    def test_a_file_beats_a_dotenv_entry(self, tmp_path: Path) -> None:
+        """`.env` is a local-development convenience. An explicit file is a
+        deliberate act, and should win."""
+        secret = tmp_path / "jwt_secret"
+        secret.write_text("f" * 40)
+        dotenv = tmp_path / ".env"
+        dotenv.write_text("JWT_SECRET=" + "d" * 40 + "\n")
+
+        import os
+
+        os.environ["JWT_SECRET_FILE"] = str(secret)
+        try:
+            assert Settings(_env_file=dotenv).jwt_secret == "f" * 40
+        finally:
+            del os.environ["JWT_SECRET_FILE"]
+
+
+class TestProductionRefusesToStartWithoutCredentials:
+    """The guarantee that used to live in `${VAR:?}` in the compose file.
+
+    It could only ever guard one way of starting the application, and compose
+    interpolates each file before merging an overlay -- so it also demanded an
+    environment variable from a deployment that had deliberately replaced it
+    with a mounted file. As a property of Settings it holds for compose, for
+    Kubernetes, for a systemd unit and for a shell, and it is testable.
+    """
+
+    def test_a_local_instance_starts_without_them(self, settings: Settings) -> None:
+        """Nothing here changes for development. The whole point of `require()`
+        is that a subsystem demands its own credential when it is used."""
+        assert settings.jwt_secret is None
+
+    def test_production_refuses(self, isolated_env: pytest.MonkeyPatch) -> None:
+        isolated_env.setenv("APP_ENV", "production")
+
+        with pytest.raises(ValueError, match="required credential"):
+            Settings(_env_file=None)
+
+    def test_it_names_every_missing_credential_at_once(
+        self, isolated_env: pytest.MonkeyPatch
+    ) -> None:
+        """A deployment missing three should learn that in one restart rather
+        than three."""
+        isolated_env.setenv("APP_ENV", "production")
+        isolated_env.setenv("JWT_SECRET", "k" * 40)
+
+        with pytest.raises(ValueError) as caught:
+            Settings(_env_file=None)
+
+        message = str(caught.value)
+        assert "DATABASE_URL" in message
+        assert "GOOGLE_API_KEY" in message
+        assert "TAVILY_API_KEY" in message
+        assert "JWT_SECRET:" not in message
+
+    def test_production_starts_once_they_are_present(
+        self, isolated_env: pytest.MonkeyPatch
+    ) -> None:
+        isolated_env.setenv("APP_ENV", "production")
+        for name, value in PRODUCTION_CREDENTIALS.items():
+            isolated_env.setenv(name, value)
+
+        assert Settings(_env_file=None).is_production is True
+
+    def test_a_file_satisfies_the_requirement(
+        self, isolated_env: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The case the compose guard could not express: production, with every
+        credential mounted rather than exported."""
+        isolated_env.setenv("APP_ENV", "production")
+        for name, value in PRODUCTION_CREDENTIALS.items():
+            path = tmp_path / name.lower()
+            path.write_text(value + "\n")
+            isolated_env.setenv(f"{name}_FILE", str(path))
+
+        configured = Settings(_env_file=None)
+
+        assert configured.is_production is True
+        assert configured.jwt_secret == PRODUCTION_CREDENTIALS["JWT_SECRET"]
+
+    def test_every_required_name_is_a_real_setting(self) -> None:
+        """A typo here would demand a credential nothing reads, and never be
+        satisfiable."""
+        assert set(PRODUCTION_REQUIRED) <= set(Settings.model_fields)

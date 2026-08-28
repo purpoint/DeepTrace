@@ -65,6 +65,11 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
         "DEFAULT_DEPTH",
     ):
         monkeypatch.delenv(name, raising=False)
+        # And the file-backed form of the same setting. A developer with
+        # JWT_SECRET_FILE exported would otherwise carry a real signing key
+        # into tests that assert a default -- the leak this fixture exists to
+        # prevent, arriving through the door added after it was written.
+        monkeypatch.delenv(f"{name}_FILE", raising=False)
     return monkeypatch
 
 

@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 .PHONY: help setup install lint format typecheck test test-int test-cov check clean run \
 	db-up db-down db-reset db-revision api worker web web-install web-check \
-	up down destroy logs
+	up down destroy logs secrets tls-cert up-deploy down-deploy
 
 VENV   := .venv
 PYTHON := $(VENV)/bin/python
@@ -91,6 +91,52 @@ destroy: ## Stop the stack and delete its data. Not reversible.
 
 logs: ## Follow the logs of every service
 	docker compose logs -f
+
+# ---------------------------------------------------------------------------
+# Deployment: TLS at the edge, secrets from files
+# ---------------------------------------------------------------------------
+
+secrets: ## Generate deploy/secrets/* for the deployment overlay
+	@mkdir -p deploy/secrets
+	@if [ -e deploy/secrets/jwt_secret ]; then \
+		echo "deploy/secrets already populated. Delete it to regenerate."; \
+		echo "Regenerating rotates every credential at once, which is rarely what you meant."; \
+		exit 1; \
+	fi
+	@python3 -c "import secrets; print(secrets.token_urlsafe(48), end='')" > deploy/secrets/jwt_secret
+	@python3 -c "import secrets; print(secrets.token_urlsafe(24), end='')" > deploy/secrets/postgres_password
+	@printf 'postgresql+asyncpg://%s:%s@postgres:5432/%s' \
+		"$${POSTGRES_USER:-deeptrace}" \
+		"$$(cat deploy/secrets/postgres_password)" \
+		"$${POSTGRES_DB:-deeptrace}" > deploy/secrets/database_url
+	@touch deploy/secrets/google_api_key deploy/secrets/tavily_api_key
+	@chmod 600 deploy/secrets/*
+	@echo "Wrote deploy/secrets/. The database URL is built from the password file,"
+	@echo "so the two cannot disagree -- do not edit either by hand."
+	@echo
+	@echo "Two are deliberately empty. Put your keys in them:"
+	@echo "  deploy/secrets/google_api_key"
+	@echo "  deploy/secrets/tavily_api_key"
+
+tls-cert: ## Generate a self-signed certificate for verifying the TLS stack
+	@mkdir -p deploy/certs
+	openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+		-keyout deploy/certs/privkey.pem \
+		-out deploy/certs/fullchain.pem \
+		-subj "/CN=$${TLS_HOST:-localhost}" \
+		-addext "subjectAltName=DNS:$${TLS_HOST:-localhost}"
+	@chmod 600 deploy/certs/privkey.pem
+	@echo
+	@echo "Self-signed, and only good for proving the stack terminates TLS."
+	@echo "A browser will refuse it, correctly. A real deployment replaces both"
+	@echo "files with a certificate from a CA and reloads nginx."
+
+up-deploy: ## Start the stack with TLS and file-based secrets
+	docker compose -f docker-compose.yml -f docker-compose.deploy.yml up --build -d
+	@echo "Client on https://localhost:$${HTTPS_PORT:-8443}"
+
+down-deploy: ## Stop the deployment stack
+	docker compose -f docker-compose.yml -f docker-compose.deploy.yml down
 
 clean: ## Remove caches and build artifacts
 	find . -type d -name __pycache__ -not -path "./$(VENV)/*" -exec rm -rf {} +

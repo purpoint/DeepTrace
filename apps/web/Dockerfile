@@ -29,6 +29,17 @@ FROM nginx:1.27-alpine AS runtime
 COPY --from=build /build/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
+# Snippets live outside conf.d on purpose. nginx's own nginx.conf includes
+# conf.d/*.conf at the http level, and a file of `location` blocks included
+# there is a configuration error rather than a shared fragment.
+COPY snippets/ /etc/nginx/snippets/
+
+# The TLS server file ships in the image but is not active: a deployment mounts
+# it over conf.d/default.conf. Carrying it here means the image that gets
+# promoted to production is the image that was tested, rather than one that
+# grows a config file at deploy time.
+COPY nginx.tls.conf /etc/nginx/nginx.tls.conf
+
 # nginx's own image already drops to an unprivileged user for the workers, but
 # the master runs as root to bind port 80. Binding 8080 instead lets the whole
 # thing run unprivileged.
