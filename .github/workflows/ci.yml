@@ -256,9 +256,15 @@ jobs:
         # The end-to-end claim of the overlay, checked rather than asserted:
         # given a path and no environment variable, the settings object holds
         # the file's contents, without its trailing newline.
+        #
+        # One file, not the directory, because that is what compose does with a
+        # `secrets:` entry -- it bind-mounts each secret individually at
+        # /run/secrets/<name>. Mounting the directory instead made this step
+        # fail on a permission the real deployment never asks for: 0700 on the
+        # directory is deliberate, and nothing in the container walks it.
         run: |
           docker run --rm \
-            -v "$PWD/deploy/secrets:/run/secrets:ro" \
+            -v "$PWD/deploy/secrets/jwt_secret:/run/secrets/jwt_secret:ro" \
             -e JWT_SECRET_FILE=/run/secrets/jwt_secret \
             deeptrace:ci python -c "
           from core.config import Settings
