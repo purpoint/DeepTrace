@@ -51,6 +51,29 @@ def headers_snippet() -> str:
     return (ROOT / "apps/web/snippets/security-headers.conf").read_text()
 
 
+def _in_build_context(path: str) -> bool:
+    """Whether `.dockerignore` lets a path reach the build.
+
+    Docker applies every pattern and the **last** match wins, which is what
+    makes `scripts/` followed by `!scripts/serve-with-worker.sh` mean "none of
+    it except this". Implemented rather than eyeballed because the failure it
+    catches -- a COPY that finds nothing -- reports itself as a build error
+    with no mention of .dockerignore at all.
+    """
+    import fnmatch
+
+    included = True
+    for line in (ROOT / ".dockerignore").read_text().splitlines():
+        rule = line.strip()
+        if not rule or rule.startswith("#"):
+            continue
+        negated = rule.startswith("!")
+        pattern = rule.lstrip("!").rstrip("/")
+        if fnmatch.fnmatch(path, pattern) or path.startswith(f"{pattern}/"):
+            included = negated
+    return included
+
+
 class TestTheComposeFile:
     def test_it_parses(self, compose: dict) -> None:
         """Not a formality. The first version of this file did not parse: an
@@ -149,24 +172,33 @@ class TestTheRenderBlueprint:
         return yaml.safe_load((ROOT / "render.yaml").read_text())
 
     def test_the_command_names_a_file_the_image_contains(self, render: dict) -> None:
-        """It did not. `scripts/` was not copied into the image, so the service
-        would have built successfully and then failed to start with
-        `sh: can't open scripts/serve-with-worker.sh` -- on the platform,
-        where finding that out costs a deploy."""
+        """Three things have to agree, and the first version of this test only
+        checked two.
+
+        The file must exist, the Dockerfile must COPY it, **and
+        `.dockerignore` must not exclude it from the build context**. Missing
+        that third one is why this test passed while the deploy failed after
+        eleven seconds with "no source files were found" -- an assertion that
+        confirmed the intention rather than checking the outcome.
+        """
         web = next(s for s in render["services"] if s["type"] == "web")
         script = web["dockerCommand"].split()[-1]
 
         assert (ROOT / script).exists(), f"{script} does not exist"
 
         dockerfile = (ROOT / "Dockerfile").read_text()
-        copied = [
-            line.split()[-2:]
+        roots = {
+            line.split()[-2].rstrip("/")
             for line in dockerfile.splitlines()
             if line.startswith("COPY") and "--from" not in line
-        ]
-        roots = {source.rstrip("/") for source, _ in copied}
+        }
         assert script.split("/")[0] in roots, (
             f"the image does not COPY {script.split('/')[0]}/, so the command cannot run"
+        )
+
+        assert _in_build_context(script), (
+            f".dockerignore excludes {script} from the build context, so the COPY "
+            f"finds nothing and the build fails before it starts"
         )
 
     def test_the_secrets_are_not_in_the_file(self, render: dict) -> None:

@@ -20,7 +20,13 @@ htmlcov
 tests/
 docs/
 data/
+
+# Development scripts stay out -- except the one a deployment runs as its
+# container command. Excluding the directory wholesale made `COPY scripts/`
+# fail with "no source files were found", which is an eleven-second build
+# failure that says nothing about .dockerignore being the reason.
 scripts/
+!scripts/serve-with-worker.sh
 
 # The web client builds in its own image, from ./apps/web as its own context.
 # Excluding it here keeps the React source out of the Python image entirely
