@@ -78,6 +78,9 @@ def run_from_state(
         verification=state.get("verification"),
         research_loops=state.get("verification_loops", 0),
         report=state.get("report"),
+        # The stages that failed without ending the run. Dropped here until a
+        # deployed run produced no report and had nothing to say about why.
+        problems=list(state.get("errors", [])),
         elapsed_seconds=elapsed_seconds,
         error=error,
         usage=usage or InMemoryRunRecorder(),

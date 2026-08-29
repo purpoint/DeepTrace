@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from core.config import Settings
+from core.config import ResearchDepth, Settings
 from core.models.run import ResearchRun
 from core.models.source import SourceType
 from core.observability.recorder import InMemoryRunRecorder
@@ -401,7 +401,14 @@ class TestResume:
 
         # One provider across both attempts, so the second picks up where the
         # first stopped rather than replaying the analyzer's response.
-        provider = FakeProvider([SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS, VERIFICATION])
+        #
+        # REPORT included, and it was not before: the run reached the reporter
+        # with nothing left to return, the report failed validation, and the
+        # `succeeded` assertion below passed anyway because success then meant
+        # "collected evidence" rather than "produced a report".
+        provider = FakeProvider(
+            [SPEC, PLAN, QUERIES, SUFFICIENT, EVIDENCE, ANALYSIS, VERIFICATION, REPORT]
+        )
 
         def fake_client(settings: object = None, *, recorder: object = None) -> LLMClient:
             return LLMClient(
@@ -577,3 +584,88 @@ class TestInterruptionIsNotATraceback:
         assert again.error is not None
         assert "LLMServerError" in again.error
         assert again.spec is not None
+
+
+class TestARunThatProducedNothingSaysSo:
+    """The first run of the deployed stack reported `status: completed,
+    error: null` having produced no report at all.
+
+    Its analyst failed -- the configured strong model had not answered a
+    request in four days -- and a failed analysis is deliberately not a failed
+    run: the evidence is collected and verified and worth more than the
+    conclusions drawn from it. But two things then went wrong at the reporting
+    boundary. Success meant "collected evidence" rather than "produced a
+    report", and the graph's record of what failed was dropped on the way out,
+    so the run was indistinguishable from one that answered the question.
+    """
+
+    @staticmethod
+    def _evidence() -> object:
+        from core.models.evidence import (
+            Evidence,
+            QuoteStatus,
+            QuoteVerification,
+            SupportStrength,
+        )
+
+        return Evidence(
+            id="ev_1",
+            source_id="src_1",
+            task_id="t",
+            claim="Records are appended in the order they are sent.",
+            supporting_text="Records are appended in the order they are sent.",
+            support_strength=SupportStrength.STRONG,
+            verification=QuoteVerification(status=QuoteStatus.VERBATIM, similarity=1.0),
+            source_quality=0.9,
+        )
+
+    @staticmethod
+    def _report(**kwargs: object) -> object:
+        from core.models.report import Report
+
+        fields: dict[str, object] = {"title": "A report", "question": "does it?"}
+        fields.update(kwargs)
+        return Report(**fields)  # type: ignore[arg-type]
+
+    def _run(self, **kwargs: object) -> ResearchRun:
+        from core.models.evidence import EvidenceExtractionReport
+
+        defaults: dict[str, object] = {
+            "research_id": "res_x",
+            "question": "does it?",
+            "depth": ResearchDepth.QUICK,
+            "evidence_report": EvidenceExtractionReport(evidence=[self._evidence()]),  # type: ignore[list-item]
+        }
+        defaults.update(kwargs)
+        return ResearchRun(**defaults)  # type: ignore[arg-type]
+
+    def test_evidence_without_a_report_is_not_success(self) -> None:
+        assert self._run().succeeded is False
+
+    def test_a_report_is_success(self) -> None:
+        assert self._run(report=self._report()).succeeded is True
+
+    def test_a_report_with_nothing_publishable_is_still_success(self) -> None:
+        """`Reporter` assembles a "No verified answer" report when every claim
+        was rejected. That is the system working -- it did the research and said
+        plainly that nothing survived checking -- and calling it a failure would
+        punish the honesty the pipeline is built around."""
+        empty = self._report(title="No verified answer: does it?", sections=[])
+
+        assert self._run(report=empty).succeeded is True
+
+    def test_the_reason_survives_to_something_a_reader_can_see(self) -> None:
+        """The graph accumulates non-fatal failures in `errors`, and
+        `run_from_state` used to drop them -- so the one question a reader has
+        about a run with no report had no answer anywhere they could reach."""
+        from core.graph.result import run_from_state
+
+        state = {
+            "research_id": "res_x",
+            "question": "does it?",
+            "depth": "quick",
+            "errors": ["analysis: LLMError: the model never answered"],
+        }
+        run = run_from_state(state)  # type: ignore[arg-type]
+
+        assert run.problems == ["analysis: LLMError: the model never answered"]

@@ -55,6 +55,18 @@ class ResearchRun:
     twice collected its sources in two passes, and a reader comparing source
     counts across runs should be able to see that."""
 
+    problems: list[str] = field(default_factory=list)
+    """Non-fatal failures the run recorded and continued past.
+
+    Distinct from ``error``, which is the thing that ended a run. A failed
+    analysis is deliberately not a failed run -- the evidence is collected and
+    verified and worth more than the conclusions -- but the reason the report is
+    missing has to survive to somebody who can read it. It did not: the graph
+    accumulated these and `run_from_state` dropped them, so a run whose analyst
+    never answered reported `status: completed, error: null` and gave a reader
+    nothing at all to go on.
+    """
+
     resumed: bool = False
     """Whether this run continued from a checkpoint rather than starting fresh.
 
@@ -89,4 +101,19 @@ class ResearchRun:
 
     @property
     def succeeded(self) -> bool:
-        return self.error is None and bool(self.evidence)
+        """Whether the run produced the thing a run is for.
+
+        A report, not merely evidence. Evidence with no report is a run that
+        collected sources, verified passages, and then stopped -- which is worth
+        keeping, and is not success. The first run of the deployed stack was
+        exactly that: 7 sources, 18 verified passages, no analysis, no claims,
+        and a status of "completed" that was indistinguishable from a run which
+        answered the question.
+
+        A report with nothing publishable still counts. `Reporter` assembles a
+        "No verified answer" report when every claim was rejected, and that is
+        the system working: it did the research and said plainly that nothing
+        survived checking. Refusing to call that success would punish the
+        honesty the whole pipeline is built around.
+        """
+        return self.error is None and bool(self.evidence) and self.report is not None

@@ -51,6 +51,18 @@ from infrastructure.db.repositories.scope import Viewer
 log = get_logger(__name__)
 
 
+def _summarise(problems: list[str]) -> str | None:
+    """Why a run has no report, in the field a reader already looks at.
+
+    Joined rather than reported one at a time because a run that lost its
+    analysis usually lost everything downstream of it, and three lines saying so
+    are one fact.
+    """
+    if not problems:
+        return "the run finished without producing a report"
+    return "; ".join(problems[:5])
+
+
 class ResearchRepository:
     """Persists and loads research runs, on behalf of one viewer."""
 
@@ -143,7 +155,13 @@ class ResearchRepository:
             "research_type": run.spec.research_type.value if run.spec else None,
             "depth": run.depth.value,
             "status": "failed" if run.error else ("completed" if run.succeeded else "partial"),
-            "error": run.error,
+            # A partial run explains itself. `run.error` is the thing that ended
+            # a run, and a partial one was not ended -- it finished, having
+            # produced no report. Without this the reader sees
+            # `status: partial, error: null` and has to read worker logs to find
+            # out that the analyst never answered, which they cannot do through
+            # the API at all.
+            "error": run.error or (_summarise(run.problems) if not run.succeeded else None),
             "spec": run.spec.model_dump(mode="json") if run.spec else None,
             "plan": run.plan.model_dump(mode="json") if run.plan else None,
             "analysis": (
