@@ -84,6 +84,12 @@ COPY --chown=deeptrace:deeptrace apps/ apps/
 COPY --chown=deeptrace:deeptrace infrastructure/ infrastructure/
 COPY --chown=deeptrace:deeptrace alembic.ini pyproject.toml README.md ./
 
+# Deployment entrypoints. `render.yaml` runs serve-with-worker.sh as the
+# container's command, and a command naming a file the image does not contain
+# fails at start with `sh: can't open` -- after a successful build, on the
+# platform, where the feedback loop is minutes long.
+COPY --chown=deeptrace:deeptrace scripts/ scripts/
+
 # The JSONL run recorder writes here when no database is configured.
 RUN mkdir -p /app/data/runs && chown -R deeptrace:deeptrace /app/data
 

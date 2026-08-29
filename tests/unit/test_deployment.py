@@ -137,6 +137,72 @@ class TestExposure:
             assert value.endswith(":-}"), f"{name} is {value!r}, which is not an empty default"
 
 
+class TestTheRenderBlueprint:
+    """The free-tier shape: one web service running both processes.
+
+    Nothing here has been deployed, so these checks are the only thing standing
+    between a mistake and a platform build minutes long.
+    """
+
+    @pytest.fixture(scope="class")
+    def render(self) -> dict:
+        return yaml.safe_load((ROOT / "render.yaml").read_text())
+
+    def test_the_command_names_a_file_the_image_contains(self, render: dict) -> None:
+        """It did not. `scripts/` was not copied into the image, so the service
+        would have built successfully and then failed to start with
+        `sh: can't open scripts/serve-with-worker.sh` -- on the platform,
+        where finding that out costs a deploy."""
+        web = next(s for s in render["services"] if s["type"] == "web")
+        script = web["dockerCommand"].split()[-1]
+
+        assert (ROOT / script).exists(), f"{script} does not exist"
+
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        copied = [
+            line.split()[-2:]
+            for line in dockerfile.splitlines()
+            if line.startswith("COPY") and "--from" not in line
+        ]
+        roots = {source.rstrip("/") for source, _ in copied}
+        assert script.split("/")[0] in roots, (
+            f"the image does not COPY {script.split('/')[0]}/, so the command cannot run"
+        )
+
+    def test_the_secrets_are_not_in_the_file(self, render: dict) -> None:
+        """A blueprint is committed. Anything real in it is real in a public
+        repository."""
+        web = next(s for s in render["services"] if s["type"] == "web")
+        by_key = {entry["key"]: entry for entry in web["envVars"]}
+
+        for key in ("GOOGLE_API_KEY", "TAVILY_API_KEY", "CORS_ORIGINS"):
+            assert by_key[key].get("sync") is False, f"{key} must be entered by hand"
+        assert by_key["JWT_SECRET"].get("generateValue") is True
+
+    def test_every_environment_key_is_a_real_setting(self, render: dict) -> None:
+        """The same check the compose file gets. A misspelled variable produces
+        a service that starts, ignores the setting, and behaves subtly
+        differently from every other environment."""
+        known = {name.upper() for name in Settings.model_fields}
+        web = next(s for s in render["services"] if s["type"] == "web")
+
+        unknown = [
+            entry["key"]
+            for entry in web["envVars"]
+            if entry["key"] not in known and entry["key"] not in CONTAINER_ONLY
+        ]
+        assert not unknown, f"render.yaml sets {unknown}, which Settings does not read"
+
+    def test_the_strong_tier_is_not_the_model_that_stopped_answering(self, render: dict) -> None:
+        """`gemini-3.7-flash` accepts requests and never replies. A default
+        naming it is a deployment that researches, collects sources, and
+        returns nothing."""
+        web = next(s for s in render["services"] if s["type"] == "web")
+        by_key = {entry["key"]: entry.get("value") for entry in web["envVars"]}
+
+        assert by_key["LLM_MODEL_STRONG"] != "gemini-3.7-flash"
+
+
 class TestTheDeploymentOverlay:
     """The overlay that turns the stack into something exposable: TLS at the
     edge, and every secret read from a file rather than the environment."""
