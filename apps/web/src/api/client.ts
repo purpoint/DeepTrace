@@ -40,10 +40,29 @@ import type {
   TraceView,
 } from "./types";
 
-/** Everything is served under /api, which the dev server proxies to the
- *  backend. One origin in development means CORS is not silently load-bearing
- *  in a way that only breaks in production. */
-const BASE = "/api";
+/** The backend's origin, when it is not this page's own.
+ *
+ *  Empty by default, and that default is the one worth having: nginx serves
+ *  this client and proxies /api on a single origin, so CORS is not
+ *  load-bearing, cookies behave the same everywhere, and the WebSocket goes to
+ *  the page's own host. The dev server proxies the same way.
+ *
+ *  It is set only for a split deployment -- a static host serving the client
+ *  and a separate host running the API -- where one origin is no longer
+ *  possible. Setting it means `CORS_ORIGINS` on the API must name this site,
+ *  and the two now have to be deployed in step. */
+export const API_ORIGIN: string = import.meta.env.VITE_API_ORIGIN ?? "";
+
+/** Where requests go.
+ *
+ *  `/api` on this origin by default, which nginx and the dev server both
+ *  proxy to the backend **with the prefix stripped** -- the API itself serves
+ *  `/auth/login`, not `/api/auth/login`.
+ *
+ *  So when the API is addressed directly there is no prefix to add: nothing is
+ *  stripping it, and `/api/auth/login` would 404 on every call. `API_ORIGIN` is
+ *  therefore the whole base, not a host to prepend. */
+const BASE = API_ORIGIN || "/api";
 
 export type ApiErrorCode =
   | "not_found"
@@ -224,16 +243,24 @@ export const api = {
 
 /** The WebSocket URL for a run's progress, resuming after a sequence number.
  *
- *  Built from the page's own origin so it follows the dev proxy and works
- *  unchanged behind TLS -- a hard-coded ws:// URL is the line that works
- *  locally and fails the moment the site is served over https.
+ *  Built from the page's own origin, or from `API_ORIGIN` when the API lives
+ *  somewhere else, so it follows the dev proxy and works unchanged behind TLS.
+ *
+ *  This is the piece a split deployment cannot fake: a static host can proxy
+ *  REST calls server-side, but not a WebSocket upgrade, so the stream has to
+ *  address the API host directly.
  *
  *  The ticket goes in the query string because a browser cannot set a header
  *  when opening a WebSocket. That is why it is a ticket and not the access
  *  token: it is good for thirty seconds and for one connection, so the copy
  *  that ends up in an access log is worthless by the time anyone reads it. */
 export function eventsUrl(researchId: string, ticket: string, after = 0): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const query = new URLSearchParams({ ticket, after: String(after) });
-  return `${protocol}//${window.location.host}${BASE}/research/${researchId}/events?${query}`;
+  const base =
+    API_ORIGIN ||
+    `${window.location.protocol === "https:" ? "https:" : "http:"}//${window.location.host}/api`;
+  // http -> ws, https -> wss, in one substitution rather than two branches that
+  // can disagree. A hard-coded ws:// is the line that works locally and fails
+  // the moment the site is served over TLS.
+  return `${base.replace(/^http/, "ws")}/research/${researchId}/events?${query}`;
 }

@@ -1,0 +1,95 @@
+# Render blueprint: the API and a worker in one free web service, with managed
+# PostgreSQL and Redis.
+#
+# The browser client is **not** here. It goes to a static host -- see
+# vercel.json -- which is the only reason this file needs CORS at all.
+#
+# ---------------------------------------------------------------------------
+# What this costs, stated before the configuration rather than after it
+# ---------------------------------------------------------------------------
+#
+# docker-compose.yml is the design: five services, the worker separate from the
+# API. This is that design folded to fit a free tier, and three things are given
+# up:
+#
+#   * **The worker is not its own service.** It runs beside the API in one
+#     container (scripts/serve-with-worker.sh) because a background worker is a
+#     paid service type. Scaling one scales both.
+#   * **The service sleeps when idle**, and a run in flight when it sleeps
+#     stops mid-way. The queue reclaims and resumes it from its checkpoint when
+#     the service next wakes -- which needs a visitor, because nothing wakes it
+#     on the queue's behalf.
+#   * **A free database expires.** The demo dies quietly some months after it is
+#     created, and the failure will look like a bug rather than a plan.
+#
+# None of that is a flaw in the application; all of it is what a free tier is.
+# Upgrading the worker to its own service is a plan change, not a code change.
+
+services:
+  - type: web
+    name: deeptrace-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    # Both processes. See the script for what this trades away.
+    dockerCommand: sh scripts/serve-with-worker.sh
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: JSON_LOGS
+        value: "true"
+
+      # The client is on another origin now, so CORS stops being decorative and
+      # starts being the thing that lets the product work. Set this to the
+      # static site's URL -- exactly, with the scheme, and no trailing slash.
+      # Listed rather than wildcarded: a wildcard is convenient right up until
+      # credentials are involved, and by then it has shipped.
+      - key: CORS_ORIGINS
+        sync: false
+
+      # Supplied by Render from the managed instances below.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: deeptrace-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: deeptrace-redis
+          property: connectionString
+
+      # Generated once and kept. Rotating it signs every existing session out.
+      - key: JWT_SECRET
+        generateValue: true
+
+      # Entered by hand in the dashboard, never in this file.
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+
+      # gemini-3.7-flash accepts requests and never answers -- a trivial prompt
+      # with a 300-second deadline returns 504, and has since 2026-08-25. The
+      # substitution is declared here for the same reason EVALUATION.md stamps
+      # the model on every figure.
+      - key: LLM_MODEL_STRONG
+        value: gemini-3.5-flash
+      - key: LLM_MODEL_CHEAP
+        value: gemini-3.5-flash-lite
+
+      # A free instance is one small container. The compose default of 5
+      # concurrent tasks is sized for a machine that is not this.
+      - key: MAX_CONCURRENT_TASKS
+        value: "2"
+
+  - type: keyvalue
+    name: deeptrace-redis
+    plan: free
+    # Nothing outside the Render network reaches it.
+    ipAllowList: []
+
+databases:
+  - name: deeptrace-db
+    plan: free

@@ -30,13 +30,19 @@ every push:
 - a secret written to a file, mounted, and read back out of `Settings` with its
   trailing newline gone
 
-What CI does **not** do is bring the stack up and drive a request through TLS
-end to end. That is the remaining gap in this milestone, and it is a gap in
-verification rather than in the configuration.
+CI does not bring the stack up. `make verify-deploy` does, and it has: on
+2026-08-29 the stack started, served over TLS, and was reached over the public
+internet through a Cloudflare tunnel -- sign-in, a submitted run, a cited
+report, and a WebSocket that connected and replayed the run's first event.
 
-`make verify-deploy` is what closes it, and it needs a Docker daemon. Until
-somebody runs it, treat everything below as untested — including these
-instructions.
+Running it the first time found **ten defects**, three latent since M24. The
+container stack had never worked, and nothing said so because nothing had tried.
+
+**The Render and Vercel split below is in exactly that state now.**
+`render.yaml`, `apps/web/vercel.json` and `scripts/serve-with-worker.sh` are
+written, parsed and type-checked; nothing has deployed them. Treat that section
+as untested -- including its instructions -- and expect it to be wrong in ways
+this paragraph cannot predict.
 
 ---
 
@@ -178,6 +184,103 @@ So a public instance of this is a demonstration, not a service. Share the link
 with someone who will try one question, not somewhere it will be found. The
 `submit` rate limit (20 per hour per user) does not help here, because the
 binding limit is the provider's and it is counted across all users at once.
+
+---
+
+## Splitting it: the client on Vercel, the API on Render
+
+The standard shape for a small product, and the one this repository now
+supports. It is **not** the better architecture here, and that is worth saying
+before the instructions rather than after them.
+
+`docker-compose.yml` already serves the client: nginx hands out the built
+assets and proxies `/api` beside them, on one origin. Splitting gives that up
+and buys a nicer domain. What it costs:
+
+- **CORS becomes load-bearing.** `CORS_ORIGINS` is empty by default and has
+  never mattered. Now the product does not work without it.
+- **The WebSocket must address the API directly.** A static host can proxy REST
+  server-side; it cannot proxy an upgrade. So the progress stream is
+  cross-origin, and `VITE_API_ORIGIN` exists for exactly this.
+- **Two deployments have to move together.** A backend URL change is a frontend
+  rebuild.
+
+### What Render's free tier does to the design
+
+`render.yaml` is `docker-compose.yml` folded to fit one free web service, and
+it gives up three things:
+
+| Compose | Render free | Why |
+|---|---|---|
+| Worker is its own service | Runs **beside the API** in one container | A Background Worker is a paid service type |
+| Migrations are a one-shot job | Run at container start | No job type; and one instance cannot race itself |
+| Runs whenever it is up | **Sleeps when idle** | Free web services do |
+
+The sleeping one has a consequence worth understanding. A run in flight when
+the service sleeps stops mid-way. It is not lost -- the queue is at-least-once,
+the reservation expires, and the job is reclaimed and resumed from its
+checkpoint -- but **nothing wakes the service on the queue's behalf**, so it
+waits for a visitor. The durability the project built is what makes this
+survivable rather than data loss.
+
+A free database also expires after some months. The demo will die quietly, and
+it will look like a bug rather than a plan.
+
+`scripts/serve-with-worker.sh` exits if *either* process stops, so the platform
+restarts the container. A worker that has quietly died inside a healthy-looking
+web service is the specific failure that arrangement risks.
+
+### Deploying it
+
+**1. The API, on Render.** Point a Blueprint at `render.yaml`. It provisions the
+web service, a PostgreSQL instance and a Key Value instance, wires
+`DATABASE_URL` and `REDIS_URL`, and generates `JWT_SECRET`. Three values are
+`sync: false` and must be entered by hand:
+
+- `GOOGLE_API_KEY`
+- `TAVILY_API_KEY`
+- `CORS_ORIGINS` — the static site's URL, exactly, with the scheme and no
+  trailing slash. Leave it until step 2 gives you one.
+
+**2. The client, on Vercel.** Import the repository with **Root Directory set to
+`apps/web`**; `apps/web/vercel.json` supplies the rest. Set one environment
+variable:
+
+```
+VITE_API_ORIGIN=https://<your-service>.onrender.com
+```
+
+It is the whole base, not a host to prepend. nginx strips the `/api` prefix
+before the API sees it, and there is no nginx here -- so the client drops the
+prefix when this is set, and `/api/auth/login` would 404 on every call if it
+did not.
+
+**3. Close the loop.** Put the Vercel URL into `CORS_ORIGINS` on Render and
+redeploy. Then create an account:
+
+```bash
+render ssh deeptrace-api -- python -m core.cli users create you@example.com
+```
+
+Or register through the sign-in screen, which is open.
+
+### The content-security policy is missing, deliberately
+
+The nginx configuration serves a CSP with `connect-src 'self'`. That exact
+policy would **block every API call** from a Vercel-hosted client, because the
+API is no longer `'self'`.
+
+`apps/web/vercel.json` therefore ships the other security headers and no CSP,
+which is a real regression against the containerised deployment and is stated
+here rather than left to be noticed. To close it, add this to the `headers`
+block with your own backend host:
+
+```
+{ "key": "Content-Security-Policy",
+  "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://YOUR-API.onrender.com wss://YOUR-API.onrender.com; frame-ancestors 'none'; base-uri 'self'" }
+```
+
+Both schemes are needed: `https:` for REST and `wss:` for the progress stream.
 
 ---
 
