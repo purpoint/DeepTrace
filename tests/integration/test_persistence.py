@@ -101,6 +101,17 @@ def make_run(research_id: str = "res_1", *, sources: list[Source] | None = None)
         evidence=[make_evidence(source_id=sources[0].id)] if sources else [],
         sources_processed=len(sources),
     )
+
+    # A report, because a run that reaches the end has one. Without it this
+    # fixture described a run that collected evidence and then stopped, while
+    # the tests below asserted it had "completed" -- which is exactly the
+    # conflation that let a live run with no report call itself completed.
+    from core.models.report import Report
+
+    run.report = Report(
+        title="Ordering guarantees in Kafka",
+        question=run.question,
+    )
     return run
 
 
