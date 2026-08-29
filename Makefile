@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 .PHONY: help setup install lint format typecheck test test-int test-cov check clean run \
 	db-up db-down db-reset db-revision api worker web web-install web-check \
-	up down destroy logs secrets tls-cert up-deploy down-deploy
+	up down destroy logs secrets tls-cert up-deploy down-deploy verify-deploy
 
 VENV   := .venv
 PYTHON := $(VENV)/bin/python
@@ -140,6 +140,9 @@ tls-cert: ## Generate a self-signed certificate for verifying the TLS stack
 	@echo "Self-signed, and only good for proving the stack terminates TLS."
 	@echo "A browser will refuse it, correctly. A real deployment replaces both"
 	@echo "files with a certificate from a CA and reloads nginx."
+
+verify-deploy: ## Bring the stack up and prove it serves over TLS, end to end
+	@bash scripts/verify-deploy.sh
 
 up-deploy: ## Start the stack with TLS and file-based secrets
 	docker compose -f docker-compose.yml -f docker-compose.deploy.yml up --build -d

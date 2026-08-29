@@ -34,6 +34,10 @@ What CI does **not** do is bring the stack up and drive a request through TLS
 end to end. That is the remaining gap in this milestone, and it is a gap in
 verification rather than in the configuration.
 
+`make verify-deploy` is what closes it, and it needs a Docker daemon. Until
+somebody runs it, treat everything below as untested — including these
+instructions.
+
 ---
 
 ## Deploying
@@ -77,16 +81,103 @@ make tls-cert           # or: TLS_HOST=research.example.com make tls-cert
 Self-signed, and a browser will refuse it — correctly. It is for checking that
 nginx serves 8443 and that 8080 redirects, not for serving anyone.
 
-### 3. Up
+### 3. Up, and proved
 
 ```bash
-make up-deploy
+make verify-deploy
 ```
 
-Then `https://localhost:8443`. Port 8080 answers every request with a permanent
-redirect and nothing else: a stack that serves both schemes is one where a
-client that forgot the scheme keeps working, so nobody finds out the credential
-travelled in clear.
+This is the one command worth running first. It brings the stack up, waits for
+the API's healthcheck (which already waits on PostgreSQL, Redis and a completed
+migration, so waiting on it waits on all of them), then checks the things that
+can only be checked by running:
+
+- 8443 answers over TLS, and 8080 answers 301 and nothing else
+- HSTS is present over TLS
+- a served asset carries the content-security policy — the header that
+  `add_header` inheritance had been silently dropping
+- an account can be created, sign in works *through nginx*, and a research
+  question is accepted with 202
+
+It leaves the stack running and prints where to sign in. `make up-deploy` on its
+own does the same thing without the checking.
+
+Then open `https://localhost:8443`. Port 8080 answers every request with a
+permanent redirect and nothing else: a stack that serves both schemes is one
+where a client that forgot the scheme keeps working, so nobody finds out the
+credential travelled in clear.
+
+### 4. An account
+
+The browser client requires one, and a freshly migrated database has none. The
+password is prompted rather than passed as an argument — a password on a command
+line is written to shell history and visible in `ps` to every other user on the
+machine:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.deploy.yml exec api \
+    python -m core.cli users create you@example.com
+```
+
+`make verify-deploy` does this for you and writes the credentials to
+`deploy/secrets/demo_account`.
+
+Registration through the sign-in screen also works and is open to anyone who can
+reach the service. On a public deployment that is worth thinking about before
+you share the URL — see below.
+
+---
+
+## Putting it on the internet with a Cloudflare Tunnel
+
+The stack runs on your own machine and a tunnel gives it a real hostname with a
+real certificate. No cloud account, no card, no open inbound port on your router
+— `cloudflared` makes an outbound connection and traffic comes back down it.
+
+```bash
+brew install cloudflared
+make verify-deploy                    # the stack must be up first
+cloudflared tunnel --url https://localhost:8443 --no-tls-verify
+```
+
+It prints a `https://<random>.trycloudflare.com` URL. That is the app.
+
+**Point it at 8443, not 8080.** Under the deployment overlay, 8080 only
+redirects, so a tunnel aimed there sends every visitor to `https://localhost`,
+which is their own machine. `--no-tls-verify` is because the origin certificate
+is self-signed: Cloudflare is not being asked to vouch for it, only to reach it.
+The public certificate is Cloudflare's and is real.
+
+WebSockets work through a tunnel, which matters here — live progress is the
+whole point of the run screen.
+
+### What this costs in honesty
+
+**TLS is terminated twice**, and the outer one is Cloudflare's. The nginx
+configuration in this repository still does real work — it is the origin's TLS,
+and the redirect, headers and proxy rules all still apply — but the certificate
+a visitor's browser validates is not yours. Worth saying plainly rather than
+implying end-to-end control you do not have.
+
+**It is up only while your machine is.** A quick tunnel's URL also changes every
+time you restart it. A named tunnel with your own domain fixes the URL and needs
+a free Cloudflare account.
+
+**Registration is open.** Anyone with the link can create an account, and there
+is no switch to turn that off. Combined with the quota below, one stranger can
+consume the day's capacity.
+
+### The quota is the real constraint
+
+The Gemini free tier allows **20 model requests per day**, and a single research
+run spends about seven of them — three on the strong tier. That is roughly **six
+runs per day for the whole deployment**, shared across everyone who visits, and
+resetting at midnight Pacific rather than UTC.
+
+So a public instance of this is a demonstration, not a service. Share the link
+with someone who will try one question, not somewhere it will be found. The
+`submit` rate limit (20 per hour per user) does not help here, because the
+binding limit is the provider's and it is counted across all users at once.
 
 ---
 
