@@ -54,8 +54,21 @@ ENV PYTHONUNBUFFERED=1 \
 
 # curl is here for the health check and nothing else. A health check that
 # cannot run is a container that reports healthy while being unable to serve.
+#
+# libpq5 is here for psycopg3, which arrives transitively with LangGraph's
+# Postgres checkpointer. psycopg does not bundle libpq -- it looks for the
+# system one and, finding none, fails at *import* with "no pq wrapper
+# available". Only the worker opens a checkpointer, so the API and the
+# migration job started perfectly while the worker crash-looped and no research
+# was ever executed. It works on a development machine because Homebrew's
+# postgres put libpq there years ago.
+#
+# procps supplies pgrep, which the worker's health check calls. Without it the
+# check exits 127 and the worker is *permanently* unhealthy -- a container that
+# is working perfectly and reports otherwise, which is the same failure as one
+# that is broken and reports healthy.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl libpq5 procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root. A container process running as root that is compromised is root

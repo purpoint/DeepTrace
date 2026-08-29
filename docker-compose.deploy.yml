@@ -54,14 +54,14 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-deeptrace}
       # The image's own file convention. Setting POSTGRES_PASSWORD as well
       # would be the same ambiguity this overlay exists to remove.
-      POSTGRES_PASSWORD:
+      POSTGRES_PASSWORD: ""
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     secrets:
       - postgres_password
 
   migrate:
     environment:
-      DATABASE_URL:
+      DATABASE_URL: ""
       DATABASE_URL_FILE: /run/secrets/database_url
     secrets:
       - database_url
@@ -84,12 +84,19 @@ services:
       - --forwarded-allow-ips
       - 172.28.0.0/16
     environment: &deploy_env
-      # Emptied, so the base file's ${VAR:?} interpolation is not required and
-      # cannot win. Each is supplied by the file beside it.
-      JWT_SECRET:
-      GOOGLE_API_KEY:
-      TAVILY_API_KEY:
-      DATABASE_URL:
+      # Explicitly the empty string, and **not** a bare `KEY:`. A null value in
+      # compose does not remove a variable -- it means "pass this through from
+      # the environment", and compose's environment includes the project's
+      # `.env` file. Written the obvious way, this overlay reached into the
+      # developer's local `.env` and injected their *development* DATABASE_URL
+      # into the production container, alongside the file that was supposed to
+      # replace it. The startup conflict check caught it; nothing else would
+      # have, because the container would simply have talked to the wrong
+      # database.
+      JWT_SECRET: ""
+      GOOGLE_API_KEY: ""
+      TAVILY_API_KEY: ""
+      DATABASE_URL: ""
       JWT_SECRET_FILE: /run/secrets/jwt_secret
       GOOGLE_API_KEY_FILE: /run/secrets/google_api_key
       TAVILY_API_KEY_FILE: /run/secrets/tavily_api_key
@@ -120,12 +127,22 @@ services:
       # on the host to drift from what was built and tested.
       - ./apps/web/nginx.tls.conf:/etc/nginx/conf.d/default.conf:ro
     healthcheck:
-      # Against the redirect on 8080 rather than the TLS port: a deployment
-      # certificate is issued for a hostname, and `wget https://localhost`
-      # inside the container fails hostname verification for a stack that is
-      # working perfectly. --spider stops wget following the redirect out to a
-      # name that does not resolve in here.
-      test: ["CMD-SHELL", "wget -q -S --spider --max-redirect=0 http://localhost:8080/ 2>&1 | grep -q ' 301'"]
+      # Against /healthz on 8080, not the TLS port and not "/".
+      #
+      # Not the TLS port, because a deployment certificate is issued for a
+      # hostname and `wget https://localhost` inside the container fails
+      # verification for a stack that is working perfectly. Not "/", because
+      # BusyBox wget -- the only wget in nginx:alpine -- has no --max-redirect
+      # and follows the 301 to a port nothing listens on in here. That is what
+      # this healthcheck did on its first real run: reported unhealthy while
+      # nginx was serving every request correctly.
+      # 127.0.0.1, never `localhost`. Inside the container `localhost` resolves
+      # to ::1 first, and nginx's `listen 8080` binds IPv4 only -- so the check
+      # got "connection refused" while nginx was serving every request on the
+      # published port. curl quietly falls back to IPv4, which is why the API's
+      # check never showed this; BusyBox wget, the only one in nginx:alpine,
+      # does not.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz | grep -q ok"]
       interval: 10s
       timeout: 5s
       retries: 5

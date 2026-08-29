@@ -63,6 +63,7 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
         "JWT_SECRET",
         "LANGSMITH_API_KEY",
         "DEFAULT_DEPTH",
+        "CORS_ORIGINS",
     ):
         monkeypatch.delenv(name, raising=False)
         # And the file-backed form of the same setting. A developer with

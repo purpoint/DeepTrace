@@ -700,6 +700,19 @@ def _users(args: argparse.Namespace) -> int:
             print(f"{user_id}  {email}{'' if active else '  (disabled)'}")
         return 0
 
+    # The same address rule the API enforces. Without this the CLI happily
+    # creates an account that can never sign in: `users create you@localhost`
+    # succeeds, and every login with it is refused 422 by the API's EmailStr,
+    # which is a confusing way to discover that two doors disagree.
+    from pydantic import TypeAdapter, ValidationError
+    from pydantic.networks import EmailStr
+
+    try:
+        TypeAdapter(EmailStr).validate_python(args.email)
+    except ValidationError:
+        print(f"{args.email} is not an address the API will accept at sign-in.")
+        return 1
+
     # Prompted rather than accepted as an argument. A password on the command
     # line is written to the shell history file and is visible in `ps` to every
     # other user on the machine, for as long as the command runs.

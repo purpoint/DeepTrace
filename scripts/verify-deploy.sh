@@ -16,7 +16,10 @@ set -euo pipefail
 
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.deploy.yml"
 BASE="https://localhost:${HTTPS_PORT:-8443}"
-EMAIL="${DEMO_EMAIL:-verify@localhost}"
+# example.com is reserved by RFC 2606 for exactly this. `verify@localhost` was
+# the obvious choice and is not a valid address: the CLI created the account and
+# the API refused every sign-in with it, 422.
+EMAIL="${DEMO_EMAIL:-verify@example.com}"
 ACCOUNT_FILE="deploy/secrets/demo_account"
 
 # -k throughout: the certificate from `make tls-cert` is self-signed, and a
@@ -68,6 +71,35 @@ case "${state:-}" in
 esac
 
 # ---------------------------------------------------------------------------
+step "Every service is healthy"
+# Not just the API, and "starting" is not "healthy". The first passing run of
+# this script reported success while the worker was crash-looping on a missing
+# libpq and the web container could never pass its health check -- because it
+# only ever asked about the API. A verification that checks one service out of
+# five can pass while the product does nothing.
+#
+# Every service in this stack declares a health check, so every one of them is
+# waited on. Accepting "health: starting" would reintroduce the same hole a
+# few seconds earlier.
+for service in postgres redis api web worker; do
+    for _ in $(seq 1 36); do
+        status=$($COMPOSE ps --format '{{.Service}} {{.Status}}' 2>/dev/null | grep "^$service " || true)
+        case "$status" in
+            *"(healthy)"*)   break ;;
+            *Restarting*|*Exit*)
+                $COMPOSE logs --tail 25 "$service" 2>&1 | tail -25
+                fail "$service is not running: $status" ;;
+        esac
+        sleep 5
+    done
+    case "$status" in
+        *"(healthy)"*) ok "$service is healthy" ;;
+        *) $COMPOSE logs --tail 25 "$service" 2>&1 | tail -25
+           fail "$service never became healthy: ${status:-absent}" ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
 step "Migrations ran to completion"
 migrate_exit=$($COMPOSE ps -a --format json migrate | grep -o '"ExitCode":[0-9]*' | head -1 | cut -d: -f2)
 [ "${migrate_exit:-1}" = "0" ] || fail "the migration job exited ${migrate_exit:-?}, not 0"
@@ -100,26 +132,54 @@ step "An account, and a request through the whole stack"
 
 if [ ! -f "$ACCOUNT_FILE" ]; then
     password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
+
     # getpass has no tty under `exec -T`, so it falls back to stdin. The prompt
     # asks twice.
-    printf '%s\n%s\n' "$password" "$password" \
-        | $COMPOSE exec -T api python -m core.cli users create "$EMAIL" >/dev/null 2>&1 \
-        || fail "could not create an account. Try it by hand:
-    $COMPOSE exec api python -m core.cli users create $EMAIL"
+    create() {
+        printf '%s\n%s\n' "$password" "$password" \
+            | $COMPOSE exec -T api python -m core.cli users create "$1" 2>&1
+    }
+
+    # `|| true` on every capture: under `set -e` a failing command substitution
+    # kills the script before the case below can read what went wrong, so the
+    # "already exists" path was unreachable and the failure printed nothing at
+    # all.
+    result=$(create "$EMAIL") || true
+    case "$result" in
+        *"already exists"*)
+            # The database volume outlives `down`, so an account from an
+            # earlier run is still there while its password file is not --
+            # and the password cannot be recovered. A fresh address is the
+            # honest way through: the old account is untouched rather than
+            # reset behind the operator's back.
+            EMAIL="verify+$(python3 -c 'import secrets;print(secrets.token_hex(4))')@example.com"
+            result=$(create "$EMAIL") || true
+            ;;
+    esac
+    case "$result" in
+        *created*) ;;
+        *) printf '%s\n' "$result"
+           fail "could not create an account" ;;
+    esac
+
     printf '%s\n%s\n' "$EMAIL" "$password" > "$ACCOUNT_FILE"
     chmod 644 "$ACCOUNT_FILE"
     ok "created $EMAIL (credentials in $ACCOUNT_FILE)"
 else
-    ok "reusing the account in $ACCOUNT_FILE"
+    EMAIL=$(sed -n 1p "$ACCOUNT_FILE")
+    ok "reusing $EMAIL from $ACCOUNT_FILE"
 fi
 
 password=$(sed -n 2p "$ACCOUNT_FILE")
 
-token=$($CURL -X POST "$BASE/api/auth/login" \
+login=$($CURL -X POST "$BASE/api/auth/login" \
     -H 'Content-Type: application/json' \
-    -d "{\"email\":\"$EMAIL\",\"password\":\"$password\"}" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])' 2>/dev/null) \
-    || fail "sign-in failed through the proxy"
+    -d "{\"email\":\"$EMAIL\",\"password\":\"$password\"}") || true
+token=$(printf '%s' "$login" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])' 2>/dev/null) || true
+# The response is shown on failure. A bare "sign-in failed" sent the last three
+# diagnoses back to a manual curl to find out why.
+[ -n "$token" ] || fail "sign-in failed through the proxy. The API said: $login"
 ok "signed in over TLS, through nginx, to the API"
 
 code=$($CURL -o /tmp/dt-submit.json -w '%{http_code}' -X POST "$BASE/api/research" \
@@ -128,6 +188,26 @@ code=$($CURL -o /tmp/dt-submit.json -w '%{http_code}' -X POST "$BASE/api/researc
     -d '{"question":"What is the CAP theorem and what does it actually constrain?","depth":"quick"}')
 [ "$code" = "202" ] || fail "submit answered $code, not 202. Body: $(cat /tmp/dt-submit.json)"
 ok "a research job was accepted (202) and queued"
+
+# ---------------------------------------------------------------------------
+step "The worker actually picked the job up"
+# Accepting a job proves the API and the queue work. It does not prove anything
+# runs it -- and a crash-looping worker leaves the request sitting in Redis
+# while every check above still passes.
+research_id=$(python3 -c 'import json;print(json.load(open("/tmp/dt-submit.json"))["research_id"])' 2>/dev/null || true)
+[ -n "$research_id" ] || fail "the submit response carried no research id"
+
+printf 'waiting for the worker to start it '
+for _ in $(seq 1 24); do
+    if $COMPOSE logs worker 2>/dev/null | grep -q "$research_id"; then
+        printf '\n'; ok "the worker began $research_id"; started=yes; break
+    fi
+    $COMPOSE ps --format '{{.Service}} {{.Status}}' 2>/dev/null | grep -q '^worker.*Restarting' \
+        && { printf '\n'; $COMPOSE logs --tail 20 worker; fail "the worker is crash-looping"; }
+    printf '.'
+    sleep 5
+done
+[ "${started:-}" = "yes" ] || { printf '\n'; fail "the worker never touched $research_id in two minutes"; }
 
 # ---------------------------------------------------------------------------
 printf '\n\033[32mThe stack is up and serving over TLS.\033[0m\n\n'

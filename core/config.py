@@ -15,16 +15,22 @@ Secrets may also arrive from *files* rather than the environment -- see
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import Field, field_validator, model_validator
 from pydantic.fields import FieldInfo
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    NoDecode,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -281,7 +287,13 @@ class Settings(BaseSettings):
     search_timeout_seconds: float = 30.0
 
     # -- API ---------------------------------------------------------------
-    cors_origins: list[str] = Field(
+    # NoDecode, because pydantic-settings otherwise JSON-decodes a list field
+    # straight out of the environment -- and `CORS_ORIGINS=` then crashes
+    # startup with "Expecting value: line 1 column 1", which names neither the
+    # variable nor the reason. The compose file sets exactly that empty value.
+    # Parsed below instead, where an empty string means what an operator means
+    # by it.
+    cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
         description=(
             "Browser origins allowed to call the API. Empty disables CORS "
@@ -290,6 +302,31 @@ class Settings(BaseSettings):
             "credentials are involved, and by then it has shipped."
         ),
     )
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, value: object) -> object:
+        """Accept an empty value, a comma-separated list, or a JSON array.
+
+        Comma-separated because that is how a person writes a list into an
+        environment variable. Requiring JSON there is a pydantic detail leaking
+        into an operator's terminal, and the failure it produces --
+        `Expecting value: line 1 column 1` -- reads as a bug in the application
+        rather than as "quote this differently".
+        """
+        if value is None:
+            return []
+        if not isinstance(value, str):
+            return value
+
+        text = value.strip()
+        if not text:
+            # An unset variable and one present but empty are the same
+            # intention: no cross-origin requests are allowed.
+            return []
+        if text.startswith("["):
+            return json.loads(text)
+        return [origin.strip() for origin in text.split(",") if origin.strip()]
 
     # -- Data stores -------------------------------------------------------
     database_url: str | None = None

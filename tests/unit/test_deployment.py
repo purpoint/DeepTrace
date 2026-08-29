@@ -146,10 +146,32 @@ class TestTheDeploymentOverlay:
 
         for name in ("JWT_SECRET", "GOOGLE_API_KEY", "TAVILY_API_KEY", "DATABASE_URL"):
             assert api[f"{name}_FILE"], f"{name} has no file"
-            # Present and null: compose passes it through from the host, where
-            # it is unset. Naming a secret both ways is a startup error, so the
-            # plain form must not carry a value here.
-            assert api[name] is None, f"{name} still carries a value"
+            # Explicitly "" and **never** null. This assertion used to demand
+            # null, and was wrong in exactly the way the overlay was wrong --
+            # both written from the same belief that a bare `KEY:` removes a
+            # variable. It does not: it means "pass this through from the
+            # environment", and compose's environment includes the project's
+            # `.env`. The overlay pulled a developer's local DATABASE_URL into
+            # the production container, and the test agreed with it.
+            assert api[name] == "", (
+                f"{name} is {api[name]!r}. A bare `KEY:` inherits from .env; "
+                f"only an explicit empty string clears it."
+            )
+
+    def test_no_environment_key_is_left_null(self, deploy_compose: dict) -> None:
+        """A null value anywhere in this file inherits from the environment,
+        and compose's environment includes `.env`. That is never what an
+        overlay whose purpose is to *replace* configuration wants -- so the
+        rule is checked across every service, not just the ones that happen to
+        carry secrets today."""
+        for name, service in deploy_compose["services"].items():
+            environment = service.get("environment") or {}
+            if not isinstance(environment, dict):
+                continue
+            null_keys = [key for key, value in environment.items() if value is None]
+            assert not null_keys, (
+                f"{name} leaves {null_keys} null, which inherits from .env rather than clearing it"
+            )
 
     def test_every_named_secret_is_declared(self, deploy_compose: dict) -> None:
         """A service referencing a secret the file does not define is a compose
@@ -182,7 +204,7 @@ class TestTheDeploymentOverlay:
             environment = service.get("environment") or {}
             declared = set(service.get("secrets") or [])
             for key, value in environment.items():
-                if not key.endswith("_FILE") or value is None:
+                if not key.endswith("_FILE") or not value:
                     continue
                 assert str(value).startswith("/run/secrets/"), value
                 assert Path(str(value)).name in declared, f"{value} is not mounted here"
@@ -340,6 +362,32 @@ class TestTls:
 
         assert "return 301 https://$host$request_uri;" in plain
         assert "proxy_pass" not in plain
+
+    def test_the_health_path_is_not_swallowed_by_the_redirect(self) -> None:
+        """A server-level `return` runs in the rewrite phase, before nginx
+        selects a location -- so it beats even an exact `location =` match.
+
+        Written the obvious way, the health path was dead configuration: every
+        probe was redirected to port 443, nothing listens there inside the
+        container, and the container reported unhealthy while serving the
+        internet correctly. The redirect has to sit in `location /` for the
+        exact match to win, and nothing static can see the difference except
+        this.
+        """
+        config = (ROOT / "apps/web/nginx.tls.conf").read_text()
+        plain = config.split("listen 8080;")[1].split("listen 8443")[0]
+
+        assert "location = /healthz" in plain
+        assert "location / {" in plain
+        # The redirect must be *inside* a location block. At server level it
+        # would pre-empt the health path again.
+        for line in plain.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("return 301"):
+                assert line.startswith("        "), (
+                    "the redirect is at server level, where it runs before "
+                    "location matching and swallows /healthz"
+                )
 
     def test_only_modern_tls_is_negotiable(self) -> None:
         config = (ROOT / "apps/web/nginx.tls.conf").read_text()

@@ -323,3 +323,41 @@ class TestProductionRefusesToStartWithoutCredentials:
         """A typo here would demand a credential nothing reads, and never be
         satisfiable."""
         assert set(PRODUCTION_REQUIRED) <= set(Settings.model_fields)
+
+
+class TestCorsOriginsFromTheEnvironment:
+    """`CORS_ORIGINS=` crashed the API at startup.
+
+    pydantic-settings JSON-decodes a list field straight out of the
+    environment, so an empty value raised `Expecting value: line 1 column 1`
+    from inside the settings source -- naming neither the variable nor the
+    reason. The compose file sets exactly that empty value, so every
+    containerised API died on boot. Nothing caught it because the stack had
+    never been started.
+    """
+
+    def test_an_empty_value_means_no_origins(self, isolated_env: pytest.MonkeyPatch) -> None:
+        isolated_env.setenv("CORS_ORIGINS", "")
+
+        assert Settings(_env_file=None).cors_origins == []
+
+    def test_a_comma_separated_list_is_how_a_person_writes_one(
+        self, isolated_env: pytest.MonkeyPatch
+    ) -> None:
+        """Requiring JSON in an environment variable is a library detail
+        leaking into an operator's terminal."""
+        isolated_env.setenv("CORS_ORIGINS", "https://a.example, https://b.example")
+
+        assert Settings(_env_file=None).cors_origins == ["https://a.example", "https://b.example"]
+
+    def test_a_json_array_still_works(self, isolated_env: pytest.MonkeyPatch) -> None:
+        """It is what the previous behaviour accepted, and what anything
+        already configured will be sending."""
+        isolated_env.setenv("CORS_ORIGINS", '["https://a.example"]')
+
+        assert Settings(_env_file=None).cors_origins == ["https://a.example"]
+
+    def test_the_default_is_still_no_origins(self, settings: Settings) -> None:
+        """Empty disables CORS entirely, which is right for a service whose
+        client is served from the same origin."""
+        assert settings.cors_origins == []
