@@ -142,6 +142,40 @@ class TestEveryCitationResolves:
 
         assert report.section(SectionKind.SUMMARY).body == "Ordering is preserved."  # type: ignore[union-attr]
 
+    async def test_a_grouped_citation_is_checked_number_by_number(self) -> None:
+        """The bug the first deployed run exposed.
+
+        `CITATION_MARKER` matched only a single number, so `[1, 2, 3]` -- which
+        is what a model writes when several passages support one sentence --
+        was never parsed. Not merely uncounted: never checked against the
+        table, and never removed. An invented number inside a group therefore
+        reached the reader *and* left `unresolved_markers` empty, so the report
+        declared itself fully cited. The live report said exactly that, with
+        nineteen citations and not one validated inline marker.
+        """
+        agent = reporter(draft_json("Order is preserved [1, 9]."))
+
+        report = await write(agent, ClaimSet(claims=[claim()]))
+
+        body = report.section(SectionKind.SUMMARY).body  # type: ignore[union-attr]
+        assert "[1]" in body
+        assert "9" not in body
+        assert report.unresolved_markers == ["[9]"]
+        assert report.is_fully_cited is False
+
+    async def test_a_group_of_real_numbers_is_kept_and_counted(self) -> None:
+        """Filtered, not accepted or rejected whole: the supported half of a
+        claim keeps its provenance rather than being discarded because the
+        model appended a wrong number to it."""
+        agent = reporter(draft_json("Order is preserved [1]."))
+
+        report = await write(agent, ClaimSet(claims=[claim()]))
+
+        section = report.section(SectionKind.SUMMARY)
+        assert section is not None
+        assert section.citation_numbers == [1]
+        assert report.is_fully_cited is True
+
     async def test_every_citation_resolves_to_a_real_source(self) -> None:
         agent = reporter(draft_json("Ordering is preserved [1]."))
 

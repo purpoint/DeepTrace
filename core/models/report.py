@@ -33,8 +33,15 @@ from core.models.claim import Claim, ClaimKind, ClaimSet, ClaimStatus
 from core.models.evidence import Evidence
 from core.models.source import Source
 
-CITATION_MARKER = re.compile(r"\[(\d{1,3})\]")
-"""How a citation appears in prose: a bracketed number, and nothing else.
+CITATION_MARKER = re.compile(r"\[(\d{1,3}(?:\s*,\s*\d{1,3})*)\]")
+"""A citation marker: one number, or several grouped in one pair of brackets.
+
+The group is not a nicety. Models write `[1, 2, 3]` when several passages
+support one sentence, and a pattern matching only `[1]` does not merely miss
+them -- it means those markers are never parsed, never checked against the
+citation table, and never removed. An invented number sitting inside a group
+therefore reached the reader with the report still declaring itself fully
+cited, which is precisely the failure this file exists to prevent.
 
 Numbers rather than author-date because the reader's next action is to click,
 and a number maps to exactly one passage in exactly one page. A citation style
@@ -277,13 +284,27 @@ def _validate_prose(body: str, citations: dict[int, Citation]) -> tuple[str, lis
     used: list[int] = []
 
     def replace(match: re.Match[str]) -> str:
-        number = int(match.group(1))
-        if number in citations:
+        """Keep the numbers that resolve, drop the ones that do not.
+
+        A group is filtered rather than accepted or rejected whole. `[1, 999]`
+        with only 1 in the table becomes `[1]`: the supported half of the claim
+        keeps its provenance, and the invented half is reported and removed.
+        Dropping the whole marker would discard a real citation because the
+        model appended a wrong one to it.
+        """
+        numbers = [int(part) for part in match.group(1).split(",")]
+        kept = [number for number in numbers if number in citations]
+        missing = [number for number in numbers if number not in citations]
+
+        for number in missing:
+            unresolved.append(f"[{number}]")
+        for number in kept:
             if number not in used:
                 used.append(number)
-            return match.group(0)
-        unresolved.append(match.group(0))
-        return ""
+
+        if not kept:
+            return ""
+        return "[" + ", ".join(str(number) for number in kept) + "]"
 
     cleaned = CITATION_MARKER.sub(replace, body)
     # Collapse the space a removed marker leaves behind, so the sentence reads

@@ -97,7 +97,16 @@ services:
       JSON_LOGS: ${JSON_LOGS:-true}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LLM_MODEL_CHEAP: ${LLM_MODEL_CHEAP:-gemini-3.5-flash-lite}
-      LLM_MODEL_STRONG: ${LLM_MODEL_STRONG:-gemini-3.7-flash}
+      # gemini-3.5-flash, not 3.7. The configured model accepts a request and
+      # never answers -- a trivial prompt with a 300-second deadline returns
+      # 504 -- and it has done since 2026-08-25. A default that names a model
+      # which cannot serve is a stack that starts, researches, collects sources
+      # and evidence, and then produces nothing: the first real run in
+      # containers gathered 7 sources and 18 passages and wrote no report,
+      # because the planner and the analyst are the calls that need this tier.
+      # Declared here rather than worked around quietly; see EVALUATION.md,
+      # which stamps the model on every figure for the same reason.
+      LLM_MODEL_STRONG: ${LLM_MODEL_STRONG:-gemini-3.5-flash}
       LLM_REQUESTS_PER_MINUTE: ${LLM_REQUESTS_PER_MINUTE:-10}
       MAX_GRAPH_ITERATIONS: ${MAX_GRAPH_ITERATIONS:-60}
       OTEL_EXPORTER: ${OTEL_EXPORTER:-none}
