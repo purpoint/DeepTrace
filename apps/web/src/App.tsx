@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { Link, Route, Routes, useLocation } from "react-router-dom";
 
 import { useHealth } from "./api/hooks";
@@ -65,6 +66,26 @@ function AccountMenu() {
   );
 }
 
+/** One destination in the header.
+ *
+ *  The current page is marked with a filled pill rather than a slightly
+ *  brighter grey. The two states were `text-ink` and `text-muted`, which is a
+ *  difference you have to look for and then doubt -- and "which page am I on"
+ *  is a question a header should answer without being read closely. */
+function NavItem({ to, active, children }: { to: string; active: boolean; children: ReactNode }) {
+  return (
+    <Link
+      to={to}
+      aria-current={active ? "page" : undefined}
+      className={`rounded-lg px-2.5 py-1.5 transition-colors ${
+        active ? "bg-raised text-ink" : "text-muted hover:bg-raised/60 hover:text-ink"
+      }`}
+    >
+      {children}
+    </Link>
+  );
+}
+
 function Header() {
   const health = useHealth();
   const degraded = health.data && health.data.status !== "ok";
@@ -72,28 +93,18 @@ function Header() {
 
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-canvas/85 backdrop-blur-md">
-      <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-3">
+      <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-6 py-3.5">
         <Link to="/" className="transition-opacity hover:opacity-80">
           <Wordmark />
         </Link>
 
-        <nav className="flex items-center gap-5 text-sm">
-          <Link
-            to="/"
-            className={`transition-colors ${
-              location.pathname === "/" ? "text-ink" : "text-muted hover:text-ink"
-            }`}
-          >
+        <nav className="flex items-center gap-1 text-sm">
+          <NavItem to="/" active={location.pathname === "/"}>
             Ask
-          </Link>
-          <Link
-            to="/history"
-            className={`transition-colors ${
-              location.pathname === "/history" ? "text-ink" : "text-muted hover:text-ink"
-            }`}
-          >
+          </NavItem>
+          <NavItem to="/history" active={location.pathname === "/history"}>
             History
-          </Link>
+          </NavItem>
 
           {degraded ? (
             // Said plainly rather than left for the user to discover when
@@ -108,6 +119,11 @@ function Header() {
               degraded
             </span>
           ) : null}
+
+          {/* Where you can go, and what you can change, are different kinds of
+              thing. Spaced as one undifferentiated row they read as four
+              equivalent controls. */}
+          <span aria-hidden className="mx-2 h-5 w-px bg-line" />
 
           <ThemeToggle />
           <AccountMenu />
