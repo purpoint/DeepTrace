@@ -67,35 +67,49 @@ export function SignIn() {
           to centre within: the previous `justify-center` sat on an element
           sized by its own content, so it did nothing and the padding alone
           decided where the card landed -- against the top of the page. */}
-      <div className="relative mx-auto flex min-h-screen max-w-5xl flex-col justify-center gap-14 px-6 py-16 lg:flex-row lg:items-center lg:gap-20">
-        {/* What the visitor came to find out. Someone arriving at a bare
-            sign-in form cannot tell this from any other chat interface, and
-            cannot see anything at all without making an account first. */}
-        <section className="lg:flex-1">
-          <div className="animate-fade-up">
-            <Logo className="h-7 w-7 lg:hidden" />
-            <h2 className="mt-5 text-2xl font-semibold tracking-tight text-ink lg:mt-0 lg:text-3xl">
-              Answers you can check.
-            </h2>
-            <p className="mt-3 max-w-md text-sm leading-6 text-muted">
+      <div className="relative mx-auto flex min-h-screen max-w-5xl flex-col justify-center px-6 py-16">
+        {/* The name, once, above everything. It was previously said only inside
+            the form's heading -- "Sign in to DeepTrace" -- which puts the brand
+            in the least important sentence on the page and leaves a visitor
+            scanning for what they have arrived at. */}
+        <header className="animate-fade-up text-center">
+          <Logo className="mx-auto h-9 w-9" />
+          <h1 className="mt-4 text-3xl font-semibold tracking-tight text-ink sm:text-4xl">
+            DeepTrace
+          </h1>
+          <p className="mt-2.5 text-sm text-muted sm:text-base">Answers you can check.</p>
+        </header>
+
+        <div className="mt-12 flex flex-col gap-14 lg:mt-14 lg:flex-row lg:items-center lg:gap-20">
+          {/* What the visitor came to find out. Someone arriving at a bare
+              sign-in form cannot tell this from any other chat interface, and
+              cannot see anything at all without making an account first. */}
+          {/* Second on a phone, first on a wide screen. Stacked, the explainer
+              and the chain put the form 1.26 screens down -- so the name says
+              what this is, the form is immediately usable, and the detail is
+              below for anyone who wants it. Someone returning to sign in should
+              not have to scroll past the pitch every time. */}
+          <section className="order-2 lg:order-1 lg:flex-1">
+            <p
+              className="max-w-md text-sm leading-6 text-muted animate-fade-up"
+              style={{ animationDelay: "60ms" }}
+            >
               DeepTrace researches a question, then shows its work. Every sentence
               traces to a quotation, and every quotation is matched against the
               page it came from — so a citation that was never on the page is
               removed before you read it.
             </p>
-          </div>
 
-          <div className="mt-9 rounded-2xl border border-line bg-surface/60 p-6">
-            <TraceChain />
-          </div>
-        </section>
+            <div className="mt-7 rounded-2xl border border-line bg-surface/60 p-6">
+              <TraceChain />
+            </div>
+          </section>
 
-        <section className="w-full lg:w-[22rem] lg:flex-none">
+          <section className="order-1 w-full lg:order-2 lg:w-[22rem] lg:flex-none">
         <div className="animate-fade-up">
-          <Logo className="hidden h-7 w-7 lg:block" />
-          <h1 className="mt-5 text-2xl font-semibold tracking-tight text-ink lg:mt-4">
-            {registering ? "Create an account" : "Sign in to DeepTrace"}
-          </h1>
+          <h2 className="text-2xl font-semibold tracking-tight text-ink">
+            {registering ? "Create an account" : "Sign in"}
+          </h2>
           <p className="mt-2 text-sm leading-6 text-muted">
             Research belongs to the account that asked for it. Nobody else can read
             it, including the questions.
@@ -185,7 +199,8 @@ export function SignIn() {
             {registering ? "Sign in" : "Create one"}
           </button>
         </p>
-        </section>
+          </section>
+        </div>
       </div>
     </div>
   );
