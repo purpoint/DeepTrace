@@ -106,6 +106,10 @@ figure. The free tier allows 20 model requests a day and a question spends
 three, so the rest is a matter of days rather than of code. No benchmark number
 is claimed before it is recorded.
 
+The reasoning behind the design is in [ARCHITECTURE.md](ARCHITECTURE.md), and the
+questions it invites — with what can and cannot be claimed from the measurements —
+in [INTERVIEW.md](INTERVIEW.md).
+
 Running it in containers, with TLS and file-based secrets, is in
 [DEPLOYMENT.md](DEPLOYMENT.md) — which also covers the deployed instance on
 Render, and what a free tier costs the design.
