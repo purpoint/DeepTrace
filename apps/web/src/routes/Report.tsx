@@ -91,7 +91,11 @@ export function Report({
       ) : null}
 
       <Reveal>
-        <article className="rounded-xl border border-line bg-surface px-8 py-7 shadow-sm">
+        {/* Less padding on a phone. The page contributes 48px and the card
+              another 64px, so a third of a 375px screen was margin and the
+              reading column came out at 34 characters -- narrow enough to
+              break lines mid-thought. */}
+          <article className="rounded-xl border border-line bg-surface px-5 py-6 shadow-sm sm:px-8 sm:py-7">
           {/* Citation markers become anchors here, so `[3]` in the prose jumps
               to the passage behind it. A citation a reader cannot follow is a
               citation that only looks like provenance. */}

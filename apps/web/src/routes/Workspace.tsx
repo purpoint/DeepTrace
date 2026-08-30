@@ -117,7 +117,7 @@ export function Workspace() {
         ) : null}
       </header>
 
-      <nav className="mb-5 flex gap-1 overflow-x-auto border-b border-line">
+      <nav className="no-scrollbar mb-5 flex gap-1 overflow-x-auto border-b border-line">
         {tabs.map((entry) => (
           <button
             key={entry.key}

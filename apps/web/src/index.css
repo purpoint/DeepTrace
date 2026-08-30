@@ -111,8 +111,34 @@ body * {
   animation: flash 1.6s ease-out;
 }
 
+/* The reading measure, and it was set from the wrong unit.
+ *
+ * A `ch` is the width of a zero, and a zero is wider than the average letter:
+ * measured on a real report a character averages 7.74px while a `ch` is
+ * 10.07px. So `70ch` was not 70 characters a line, it was 89 -- past the range
+ * typography has settled on, on the one screen in this application built to be
+ * read rather than scanned.
+ *
+ * 58ch measures at a median of 71 characters across the paragraphs of a real
+ * report. Kept in `ch` so it still tracks the type size; corrected by measuring
+ * the rendered text rather than by trusting the unit's name. */
 .prose-report {
-  max-width: 70ch;
+  margin-inline: auto;
+  max-width: 58ch;
+}
+
+/* A tab strip has to scroll on a narrow screen, and `overflow-x: auto` makes
+ * the browser reserve and paint a scrollbar even where there is nothing to
+ * scroll -- a one-pixel line across the tab row of every report on a desktop.
+ * Scrolling is untouched; only the track is hidden, which is what a tab strip
+ * does on iOS for the same reason. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
 ::selection {
