@@ -76,7 +76,13 @@ data/eval_runs/
 # Roadmap and per-milestone learning notes are kept on the developer machine
 # and deliberately not published. Public documentation required by the
 # documentation milestone can be un-ignored individually when it is written.
-docs/
+# Local working notes -- CONTEXT.md and ROADMAP.md are written for one reader
+# and are not part of the repository. The ADRs are: they are a deliverable, so
+# the directory is re-included. `docs/*` rather than `docs/` because git will
+# not re-include a path inside an excluded *directory*, only inside an excluded
+# set of paths.
+docs/*
+!docs/adr/
 
 # ---------------------------------------------------------------------------
 # Editors / OS / tooling
