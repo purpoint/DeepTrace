@@ -3,10 +3,12 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { useHealth, useSubmit } from "../api/hooks";
+import { Link } from "react-router-dom";
+
+import { useHealth, useHistory, useSubmit } from "../api/hooks";
 import type { Depth } from "../api/types";
 import { ApiError } from "../api/client";
-import { Failure } from "../components/ui";
+import { Failure, relativeTime } from "../components/ui";
 
 /** Four questions, one per research type the analyzer recognises.
  *
@@ -35,6 +37,14 @@ const EXAMPLES: { type: string; question: string }[] = [
   },
 ];
 
+/** The same colours the history page gives a status, so a run does not change
+ *  meaning between the two screens that show it. */
+const RECENT_STATUS: Record<string, string> = {
+  completed: "text-verdict-supported",
+  failed: "text-verdict-unsupported",
+  partial: "text-verdict-partial",
+};
+
 const DEPTHS: { value: Depth; label: string; detail: string }[] = [
   { value: "quick", label: "Quick", detail: "3 tasks, 8 sources — about 2 minutes" },
   { value: "standard", label: "Standard", detail: "6 tasks, 20 sources — about 5 minutes" },
@@ -47,6 +57,12 @@ export function Ask() {
   const navigate = useNavigate();
   const submit = useSubmit();
   const health = useHealth();
+
+  // Three, not the twenty the history page shows. This is somewhere to pick up
+  // from, not a second history -- and a list long enough to scan is a list that
+  // has replaced the question box as the subject of the screen.
+  const recent = useHistory(3);
+  const hasRecent = (recent.data?.length ?? 0) > 0;
 
   // The queue is what accepts work. Saying so before the user types a
   // paragraph is better than accepting it and failing on submit.
@@ -91,9 +107,13 @@ export function Ask() {
             placeholder="Compare Kafka and RabbitMQ for high-scale microservices"
             className="w-full resize-y rounded-xl border border-line bg-surface px-4 py-3.5 text-ink shadow-sm transition-colors placeholder:text-faint focus:border-brand/60 focus:outline-none focus:ring-4 focus:ring-brand/10"
           />
-          <div className="mt-2 flex justify-between text-xs text-faint">
+          {/* `items-start` and `shrink-0`, because on a narrow screen the hint
+              wraps to two lines and a counter that is merely "at the end of the
+              row" lands beside the first of them -- reading as though 0/2000
+              were a phrase in the middle of the sentence. */}
+          <div className="mt-2 flex items-start justify-between gap-4 text-xs text-faint">
             <span>A specific question produces better research than a topic.</span>
-            <span>{question.trim().length}/2000</span>
+            <span className="shrink-0 tabular-nums">{question.trim().length}/2000</span>
           </div>
         </div>
 
@@ -151,6 +171,45 @@ export function Ask() {
         </button>
       </form>
 
+      {/* What goes here depends on whether this account has asked anything.
+          The examples answer a blank page; once there is work to return to,
+          the more useful thing is the work. Showing both would make the screen
+          a menu of two unrelated lists. */}
+      {hasRecent ? (
+        <section className="mt-12 animate-fade-up" style={{ animationDelay: "160ms" }}>
+          <div className="flex items-baseline justify-between">
+            <h2 className="text-xs font-medium uppercase tracking-[0.12em] text-faint">
+              Pick up where you left off
+            </h2>
+            <Link to="/history" className="text-xs text-muted transition-colors hover:text-ink">
+              All research →
+            </Link>
+          </div>
+          <div className="mt-3 divide-y divide-line rounded-xl border border-line">
+            {(recent.data ?? []).map((run) => (
+              <Link
+                key={run.research_id}
+                to={`/research/${run.research_id}`}
+                className="flex items-center justify-between gap-4 px-4 py-3 transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-raised"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-sm text-ink">{run.question}</span>
+                  <span className="mt-0.5 block text-xs text-faint">
+                    {run.depth} · {relativeTime(run.created_at)}
+                  </span>
+                </span>
+                <span
+                  className={`shrink-0 text-xs ${
+                    RECENT_STATUS[run.status] ?? "text-faint"
+                  }`}
+                >
+                  {run.status}
+                </span>
+              </Link>
+            ))}
+          </div>
+        </section>
+      ) : (
       <section className="mt-12 animate-fade-up" style={{ animationDelay: "160ms" }}>
         <h2 className="text-xs font-medium uppercase tracking-[0.12em] text-faint">
           Or start from one of these
@@ -173,6 +232,7 @@ export function Ask() {
           ))}
         </div>
       </section>
+      )}
     </div>
   );
 }
