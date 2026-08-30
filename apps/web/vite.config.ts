@@ -11,7 +11,12 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8000",
+        // Overridable so the dev client can be pointed at a deployed API --
+        // `VITE_DEV_API_TARGET=https://… npm run dev`. Through the proxy rather
+        // than by setting VITE_API_ORIGIN, because the proxy runs server-side
+        // and needs no CORS: adding a localhost origin to a deployed service's
+        // allow-list to look at a page is a widening that outlives the look.
+        target: process.env.VITE_DEV_API_TARGET ?? "http://127.0.0.1:8000",
         changeOrigin: true,
         ws: true,
         rewrite: (path) => path.replace(/^\/api/, ""),

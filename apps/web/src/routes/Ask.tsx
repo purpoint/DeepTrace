@@ -8,6 +8,33 @@ import type { Depth } from "../api/types";
 import { ApiError } from "../api/client";
 import { Failure } from "../components/ui";
 
+/** Four questions, one per research type the analyzer recognises.
+ *
+ *  A blank textarea is a hard thing to start from, and the hint underneath it
+ *  -- "a specific question produces better research than a topic" -- describes
+ *  a difference that is much easier to show than to state. These are taken
+ *  from the evaluation benchmark, so they are questions the system is actually
+ *  measured on rather than ones chosen to flatter it.
+ *
+ *  The type label is not decoration. The analyzer classifies every question
+ *  into one of these, and the classification changes how the run is planned,
+ *  so naming them here shows a real distinction rather than a category. */
+const EXAMPLES: { type: string; question: string }[] = [
+  {
+    type: "comparison",
+    question: "Compare gRPC and REST for internal service-to-service communication.",
+  },
+  { type: "explanation", question: "How does Raft achieve consensus when a leader fails?" },
+  {
+    type: "investigation",
+    question: "What are the known failure modes of using Redis as a primary datastore?",
+  },
+  {
+    type: "recommendation",
+    question: "Should a small team adopt Kubernetes for a three-service application?",
+  },
+];
+
 const DEPTHS: { value: Depth; label: string; detail: string }[] = [
   { value: "quick", label: "Quick", detail: "3 tasks, 8 sources — about 2 minutes" },
   { value: "standard", label: "Standard", detail: "6 tasks, 20 sources — about 5 minutes" },
@@ -36,7 +63,11 @@ export function Ask() {
   const error = submit.error as ApiError | null;
 
   return (
-    <div className="mx-auto max-w-2xl px-6 py-20">
+    /* Centred rather than pinned to the top. The form is short and the viewport
+       is not, so top alignment left two thirds of the screen empty under it --
+       which reads as a page that failed to load rather than one that is
+       waiting for a question. */
+    <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-2xl flex-col justify-center px-6 py-16">
       <div className="animate-fade-up">
         <h1 className="text-3xl font-semibold tracking-tight text-ink">
           What do you want to know?
@@ -119,6 +150,29 @@ export function Ask() {
           <span className="transition-transform group-hover:translate-x-0.5">→</span>
         </button>
       </form>
+
+      <section className="mt-12 animate-fade-up" style={{ animationDelay: "160ms" }}>
+        <h2 className="text-xs font-medium uppercase tracking-[0.12em] text-faint">
+          Or start from one of these
+        </h2>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {EXAMPLES.map((example) => (
+            <button
+              key={example.question}
+              type="button"
+              onClick={() => setQuestion(example.question)}
+              className="group rounded-xl border border-line bg-surface/50 px-4 py-3 text-left transition-colors hover:border-brand/40 hover:bg-surface"
+            >
+              <span className="font-mono text-[10px] tracking-[0.1em] text-faint">
+                {example.type}
+              </span>
+              <span className="mt-1 block text-sm leading-6 text-muted transition-colors group-hover:text-ink">
+                {example.question}
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }
