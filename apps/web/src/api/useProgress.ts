@@ -20,6 +20,16 @@
  * and destroyed by first use, so the copy left in an access log is worthless.
  * The consequence is that a reconnect costs one HTTP request before the socket,
  * which is the right price for not putting a fifteen-minute token in a URL.
+ *
+ * The same socket serves a run that has already finished. The server replays
+ * the history and closes, so a finished run's progress can be read back exactly
+ * as it happened -- which is what the screen above this hook is for, and it was
+ * previously the one thing it could not do: the hook simply did not connect,
+ * and the page reported a run from last week as waiting for a worker.
+ *
+ * `live` is therefore not "connect or do not". It is whether more events are
+ * still possible, and it governs only what a quiet or closed socket means: a
+ * pause to recover from, or the end of the recording.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -39,7 +49,7 @@ export interface Progress {
   finished: boolean;
 }
 
-export function useProgress(researchId: string, enabled: boolean): Progress {
+export function useProgress(researchId: string, { live }: { live: boolean }): Progress {
   const [events, setEvents] = useState<ProgressEvent[]>([]);
   const [state, setState] = useState<StreamState>("connecting");
   const [finished, setFinished] = useState(false);
@@ -51,6 +61,13 @@ export function useProgress(researchId: string, enabled: boolean): Progress {
   const socket = useRef<WebSocket | null>(null);
   const timer = useRef<number | null>(null);
   const stopped = useRef(false);
+
+  // `live` is a ref for the same reason as the rest: it flips exactly once,
+  // when a run finishes, and putting it in `connect`'s dependencies would
+  // rebuild the callback at that moment -- tearing down the socket that is
+  // mid-delivery of the very events that flipped it.
+  const liveRef = useRef(live);
+  liveRef.current = live;
 
   const scheduleRetry = useCallback(() => {
     if (stopped.current) return;
@@ -100,7 +117,21 @@ export function useProgress(researchId: string, enabled: boolean): Progress {
 
       // Heartbeats keep intermediaries from closing an idle connection. They
       // are not events and must not appear in the narration.
-      if (payload.kind === "heartbeat") return;
+      //
+      // For a run that has already finished they mean one thing more: the
+      // server sends one when a poll finds nothing, so the first heartbeat is
+      // the point at which the history has all been delivered and there is
+      // nothing further to come. Closing here rather than waiting is the
+      // difference between a replay that ends and one that holds the socket
+      // open for the server's five-minute idle timeout while the screen spins.
+      if (payload.kind === "heartbeat") {
+        if (!liveRef.current) {
+          stopped.current = true;
+          setState("closed");
+          ws.close();
+        }
+        return;
+      }
 
       const event = payload as ProgressEvent;
       if (event.sequence <= lastSequence.current) return; // already seen
@@ -128,6 +159,17 @@ export function useProgress(researchId: string, enabled: boolean): Progress {
         return;
       }
 
+      // A finished run has nothing left to send, so a close is the end of the
+      // replay rather than a connection to recover. Retrying here would
+      // reconnect forever against a run whose events have aged out of the
+      // capped history -- backing off to ten seconds and staying there, on a
+      // page nobody expects to be doing any work at all.
+      if (!liveRef.current) {
+        stopped.current = true;
+        setState("closed");
+        return;
+      }
+
       setState("closed");
       scheduleRetry();
     };
@@ -138,8 +180,6 @@ export function useProgress(researchId: string, enabled: boolean): Progress {
   connectRef.current = connect;
 
   useEffect(() => {
-    if (!enabled) return;
-
     stopped.current = false;
     lastSequence.current = 0;
     attempt.current = 0;
@@ -156,7 +196,7 @@ export function useProgress(researchId: string, enabled: boolean): Progress {
       socket.current?.close();
       socket.current = null;
     };
-  }, [connect, enabled]);
+  }, [connect]);
 
   return {
     events,

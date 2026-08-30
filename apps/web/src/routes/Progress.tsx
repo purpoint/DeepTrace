@@ -54,7 +54,7 @@ export function ProgressView({ detail }: { detail: ResearchDetail }) {
   const client = useQueryClient();
   const cancel = useCancel(detail.research_id);
   const running = !["completed", "failed", "cancelled", "partial"].includes(detail.status);
-  const { events, state, finished } = useProgress(detail.research_id, running);
+  const { events, state, finished } = useProgress(detail.research_id, { live: running });
 
   // When the stream says the run finished, the finished-run queries become
   // fetchable. Invalidating here rather than polling is what keeps the page
@@ -83,13 +83,21 @@ export function ProgressView({ detail }: { detail: ResearchDetail }) {
   return (
     <div className="space-y-4">
       <Panel
-        title="Researching"
+        title={running ? "Researching" : "How this run went"}
         subtitle={
           state === "unavailable"
-            ? "Live updates are unavailable; this page is polling instead."
-            : state === "closed" && !finished
-              ? "Reconnecting…"
-              : "Live"
+            ? running
+              ? "Live updates are unavailable; this page is polling instead."
+              : "Live updates are unavailable, so the recording cannot be read back."
+            : !running
+              ? // A finished run is a replay, and saying "Live" over one is the
+                // screen claiming to watch something that stopped days ago.
+                state === "closed"
+                ? "Replayed from what was recorded"
+                : "Replaying…"
+              : state === "closed" && !finished
+                ? "Reconnecting…"
+                : "Live"
         }
         actions={
           running ? (
@@ -129,9 +137,26 @@ export function ProgressView({ detail }: { detail: ResearchDetail }) {
         </ol>
       </Panel>
 
-      <Panel title="What it is doing" subtitle={`${events.length} events`}>
+      <Panel
+        title={running ? "What it is doing" : "What it did"}
+        subtitle={`${events.length} events`}
+      >
         {events.length === 0 ? (
-          <Spinner label="Waiting for the worker to pick this up…" />
+          running ? (
+            <Spinner label="Waiting for the worker to pick this up…" />
+          ) : state === "closed" || state === "unavailable" ? (
+            // Not a failure, and not worth an error colour. Progress is kept in
+            // a capped list per run, so an old run's narration is genuinely
+            // gone -- and saying so is better than a spinner that waits for a
+            // worker which finished with this run long ago.
+            <p className="text-sm text-muted">
+              This run's progress is no longer recorded. The step-by-step
+              narration is kept for a while after a run and then dropped; the
+              report, claims, evidence and trace are permanent.
+            </p>
+          ) : (
+            <Spinner label="Reading back what was recorded…" />
+          )
         ) : (
           <ul className="space-y-2.5 font-mono text-xs">
             {events.map((event) => (

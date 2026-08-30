@@ -89,14 +89,14 @@ afterEach(() => {
 
 describe("useProgress", () => {
   it("starts from the beginning of the stream", async () => {
-    renderHook(() => useProgress("res_1", true));
+    renderHook(() => useProgress("res_1", { live: true }));
 
     await waitFor(() => expect(FakeSocket.opened).toHaveLength(1));
     expect(FakeSocket.opened[0]).toContain("after=0");
   });
 
   it("collects events in order", async () => {
-    const { result } = renderHook(() => useProgress("res_1", true));
+    const { result } = renderHook(() => useProgress("res_1", { live: true }));
     await waitFor(() => expect(FakeSocket.live).toHaveLength(1));
 
     act(() => {
@@ -111,7 +111,7 @@ describe("useProgress", () => {
     // The whole contract. Reconnecting with after=0 would replay events the
     // user already watched, and every counter in the UI would climb twice.
     vi.useFakeTimers();
-    renderHook(() => useProgress("res_1", true));
+    renderHook(() => useProgress("res_1", { live: true }));
     await vi.waitFor(() => expect(FakeSocket.live).toHaveLength(1));
 
     act(() => {
@@ -132,7 +132,7 @@ describe("useProgress", () => {
   it("ignores an event it has already seen", async () => {
     // Replay and live delivery overlap by design, so the same event can arrive
     // by both paths. Counting it twice is what that would look like.
-    const { result } = renderHook(() => useProgress("res_1", true));
+    const { result } = renderHook(() => useProgress("res_1", { live: true }));
     await waitFor(() => expect(FakeSocket.live).toHaveLength(1));
 
     act(() => {
@@ -144,7 +144,7 @@ describe("useProgress", () => {
   });
 
   it("ignores heartbeats", async () => {
-    const { result } = renderHook(() => useProgress("res_1", true));
+    const { result } = renderHook(() => useProgress("res_1", { live: true }));
     await waitFor(() => expect(FakeSocket.live).toHaveLength(1));
 
     act(() => {
@@ -158,7 +158,7 @@ describe("useProgress", () => {
 
   it("stops reconnecting once the run has finished", async () => {
     vi.useFakeTimers();
-    const { result } = renderHook(() => useProgress("res_1", true));
+    const { result } = renderHook(() => useProgress("res_1", { live: true }));
     await vi.waitFor(() => expect(FakeSocket.live).toHaveLength(1));
 
     act(() => {
@@ -178,7 +178,7 @@ describe("useProgress", () => {
     // 1013 means the deployment has no event stream. Retrying asks the same
     // question until something is redeployed, so the UI falls back to polling.
     vi.useFakeTimers();
-    const { result } = renderHook(() => useProgress("res_1", true));
+    const { result } = renderHook(() => useProgress("res_1", { live: true }));
     await vi.waitFor(() => expect(FakeSocket.live).toHaveLength(1));
 
     act(() => FakeSocket.live[0]!.drop(1013));
@@ -195,7 +195,7 @@ describe("useProgress", () => {
     // a fresh problem and should be retried promptly rather than inheriting
     // the patience earned by an earlier outage.
     vi.useFakeTimers();
-    renderHook(() => useProgress("res_1", true));
+    renderHook(() => useProgress("res_1", { live: true }));
     await vi.waitFor(() => expect(FakeSocket.live).toHaveLength(1));
 
     act(() => FakeSocket.live[0]!.drop());
@@ -218,7 +218,7 @@ describe("useProgress", () => {
     // generator.
     vi.useFakeTimers();
     FakeSocket.opensSuccessfully = false;
-    renderHook(() => useProgress("res_1", true));
+    renderHook(() => useProgress("res_1", { live: true }));
     await vi.waitFor(() => expect(FakeSocket.live).toHaveLength(1));
 
     act(() => FakeSocket.live[0]!.drop());
@@ -242,7 +242,7 @@ describe("useProgress", () => {
   it("closes the socket when the component goes away", async () => {
     // One leaked socket per navigation adds up on the server for pages nobody
     // is looking at.
-    const { unmount } = renderHook(() => useProgress("res_1", true));
+    const { unmount } = renderHook(() => useProgress("res_1", { live: true }));
     await waitFor(() => expect(FakeSocket.live).toHaveLength(1));
 
     unmount();
@@ -250,14 +250,88 @@ describe("useProgress", () => {
     expect(FakeSocket.live[0]!.closed).toBe(true);
   });
 
-  it("does not connect at all when disabled", () => {
-    renderHook(() => useProgress("res_1", false));
+  // A finished run. The server replays its history and closes, so these are
+  // the cases where the screen is reading back a recording rather than
+  // watching work happen -- and where "reconnect until it answers" is exactly
+  // the wrong response to a quiet socket.
 
-    expect(FakeSocket.opened).toHaveLength(0);
+  it("connects for a run that has already finished, to replay it", async () => {
+    // The reason this hook exists in replay mode at all. It used to refuse to
+    // connect for a finished run, so the Progress screen showed seven unticked
+    // stages and a spinner waiting for a worker, over a run from last week.
+    const { result } = renderHook(() => useProgress("res_1", { live: false }));
+
+    await waitFor(() => expect(FakeSocket.live).toHaveLength(1));
+    act(() => {
+      FakeSocket.live[0]!.deliver(event(1, "started"));
+      FakeSocket.live[0]!.deliver(event(2, "report_ready"));
+    });
+
+    expect(result.current.events).toHaveLength(2);
+  });
+
+  it("ends the replay on the first heartbeat", async () => {
+    // The server sends one when a poll finds nothing. For a finished run that
+    // means the history is fully delivered, so holding the socket for the
+    // five-minute idle timeout only keeps a spinner on screen.
+    const { result } = renderHook(() => useProgress("res_1", { live: false }));
+    await waitFor(() => expect(FakeSocket.live).toHaveLength(1));
+
+    act(() => FakeSocket.live[0]!.deliver({ kind: "heartbeat", sequence: 0 } as never));
+
+    await waitFor(() => expect(FakeSocket.live[0]!.closed).toBe(true));
+    expect(result.current.state).toBe("closed");
+  });
+
+  it("does not reconnect when a finished run's replay closes", async () => {
+    // A run whose events have aged out of the capped history closes without a
+    // terminal event. Treating that as a dropped connection reconnects forever
+    // against a run that will never say anything again.
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useProgress("res_1", { live: false }));
+    await vi.waitFor(() => expect(FakeSocket.live).toHaveLength(1));
+
+    act(() => FakeSocket.live[0]!.drop(1000));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(FakeSocket.opened).toHaveLength(1);
+    expect(result.current.state).toBe("closed");
+    expect(result.current.events).toHaveLength(0);
+  });
+
+  it("still reconnects for a run that is going", async () => {
+    // The mirror of the test above, so that "do not reconnect" cannot quietly
+    // become "never reconnect" -- which would silently break every live run.
+    vi.useFakeTimers();
+    renderHook(() => useProgress("res_1", { live: true }));
+    await vi.waitFor(() => expect(FakeSocket.live).toHaveLength(1));
+
+    act(() => FakeSocket.live[0]!.drop(1006));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(FakeSocket.opened.length).toBeGreaterThan(1);
+  });
+
+  it("keeps delivering to a live run when a heartbeat arrives", async () => {
+    // The heartbeat's other meaning must not leak into the live case: there it
+    // is only an intermediary keep-alive, and closing on it would end the
+    // stream of every run that paused for five seconds.
+    const { result } = renderHook(() => useProgress("res_1", { live: true }));
+    await waitFor(() => expect(FakeSocket.live).toHaveLength(1));
+
+    act(() => FakeSocket.live[0]!.deliver({ kind: "heartbeat", sequence: 0 } as never));
+    act(() => FakeSocket.live[0]!.deliver(event(1)));
+
+    expect(FakeSocket.live[0]!.closed).toBe(false);
+    expect(result.current.events).toHaveLength(1);
   });
 
   it("carries a ticket", async () => {
-    renderHook(() => useProgress("res_1", true));
+    renderHook(() => useProgress("res_1", { live: true }));
 
     await waitFor(() => expect(FakeSocket.opened).toHaveLength(1));
     expect(FakeSocket.opened[0]).toContain("ticket=ticket-1");
@@ -268,7 +342,7 @@ describe("useProgress", () => {
     // on reconnect would be refused, and the client would back off forever
     // against a server that was working perfectly.
     vi.useFakeTimers();
-    renderHook(() => useProgress("res_1", true));
+    renderHook(() => useProgress("res_1", { live: true }));
     await vi.waitFor(() => expect(FakeSocket.live).toHaveLength(1));
 
     act(() => FakeSocket.live[0]!.drop());
@@ -287,7 +361,7 @@ describe("useProgress", () => {
     vi.useFakeTimers();
     vi.mocked(api.wsTicket).mockRejectedValueOnce(new Error("no ticket"));
 
-    renderHook(() => useProgress("res_1", true));
+    renderHook(() => useProgress("res_1", { live: true }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(600);
     });
