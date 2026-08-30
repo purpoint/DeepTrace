@@ -200,9 +200,7 @@ class TestTheVercelConfig:
         wss is a typo that presents as an intermittent bug."""
         connect = self._csp(vercel).split("connect-src")[1].split(";")[0]
         hosts = {
-            token.split("://", 1)[1].rstrip("/")
-            for token in connect.split()
-            if "://" in token
+            token.split("://", 1)[1].rstrip("/") for token in connect.split() if "://" in token
         }
 
         assert len(hosts) == 1, f"connect-src names more than one host: {hosts}"
