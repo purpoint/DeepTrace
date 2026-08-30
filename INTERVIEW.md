@@ -345,6 +345,45 @@ against it. Quality monitoring today means running the benchmark and reading it.
 
 ---
 
+### What did you ship without ever looking at?
+
+One screen, and it was the one that most needed looking at.
+
+The Progress view shows a run happening — the seven stages, and every event as it
+arrives. Seeing it therefore requires a run **in flight**, and a run costs about seven
+of the twenty model requests the free tier allows in a day, competing directly with the
+benchmark. So it was written, tested at the hook below it, shipped, deployed twice, and
+never opened.
+
+Reading it was enough. `useProgress` took an `enabled` flag and the workspace passed
+`running`, so for a **finished** run the hook did not connect at all and the screen had
+no events to render. That draws as seven unticked stages under the heading
+"Researching", subtitled **"Live"**, above a spinner reading *"Waiting for the worker to
+pick this up"* — over a run that completed days earlier. And the commit that made the
+workspace tabs addressable had quietly turned it into a URL someone can send to someone
+else.
+
+The server was never the problem. It replays a run's history and closes as soon as it
+sends a terminal event; the client was the only half that refused to ask. So `live` no
+longer means "connect or do not" — the hook always connects, because replay is the
+point — and now means "more events are possible", governing only what a quiet or closed
+socket signifies: a pause to recover from, or the end of the recording.
+
+Removing that gate needed two guards the old behaviour had been providing by accident. A
+close without a terminal event is what a run whose events have aged out of the capped
+history produces, and retrying it reconnects forever on a page nobody expects to be
+working. And a quiet socket would otherwise be held for the server's 300-second idle
+timeout, spinning. The second is fixed by noticing that a heartbeat — which the server
+sends when a poll finds nothing — *means* end-of-recording once nothing more can come.
+
+Two things I would want to be asked about here. **The cheap half of "found by looking"
+is reading**, and it was available at any point in the last month for nothing. And the
+reason it went unread is a real engineering constraint rather than laziness: a quota
+that makes observing your own system compete with measuring it. That is worth saying out
+loud, because it will be true of anything metered.
+
+---
+
 # What I would claim, and what I would not
 
 The resume section of the milestone list says *"only after implementation and
@@ -360,6 +399,8 @@ measurement"*. Applying that honestly:
 - Crash recovery: verified by SIGKILL, with the database showing zero repeated work.
 - Sanitizer: lossless on **20,835 words** of real documentation.
 - API accepts and enqueues, returning 202 in **3.8ms**.
+- The free tier's sleep penalty: a cold `/health` on the deployed API answered 200 in
+  **52.8s** on 2026-08-30. Documented as "~50 seconds" before that; now measured.
 - On the runs that completed: citation correctness **0.99**, groundedness **1.00**,
   verbatim rate **0.94**.
 
