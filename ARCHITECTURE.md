@@ -236,4 +236,5 @@ Stated because an architecture document that lists only strengths is marketing.
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Containers, TLS, secrets, the hosted deployment |
 | [EVALUATION.md](EVALUATION.md) | Measured numbers, and their denominators |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Failures seen for real, and what each meant |
+| [PROMPTS.md](PROMPTS.md) | The eight prompts, what each may see, and versioning |
 | [docs/adr/](docs/adr/) | Decisions, with the reasoning and the ones that changed |
