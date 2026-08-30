@@ -31,20 +31,48 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 def normalise_database_url(url: str) -> str:
-    """Force the async driver.
+    """Force the async driver, and spell SSL the way asyncpg spells it.
 
     A ``postgresql://`` URL selects the synchronous driver, which fails at
     connect time with an error that does not mention the driver. Rewriting it
     here means a copied-from-somewhere URL works instead of producing a
     confusing failure.
+
+    ``sslmode`` is the second half of the same problem. Every managed Postgres
+    -- Neon, Supabase, RDS -- hands out a connection string ending in
+    ``?sslmode=require``, because that is libpq's parameter and psycopg reads
+    it. asyncpg does not: it wants ``ssl``, and the failure is
+    ``TypeError: connect() got an unexpected keyword argument 'sslmode'``,
+    which names a keyword argument rather than SSL and sends the reader into
+    the wrong file.
+
+    Copied-from-the-dashboard is exactly the case this function exists for, so
+    it translates rather than requiring the operator to know which driver is
+    underneath.
     """
-    if url.startswith("postgresql+asyncpg://"):
-        return url
-    if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    for prefix, replacement in (
+        ("postgresql+asyncpg://", None),
+        ("postgresql://", "postgresql+asyncpg://"),
+        ("postgres://", "postgresql+asyncpg://"),
+    ):
+        if url.startswith(prefix):
+            if replacement is not None:
+                url = url.replace(prefix, replacement, 1)
+            return _asyncpg_ssl(url)
     return url
+
+
+def _asyncpg_ssl(url: str) -> str:
+    """Rename ``sslmode`` to ``ssl``, leaving every other parameter alone."""
+    base, separator, query = url.partition("?")
+    if not separator:
+        return url
+
+    parts = [
+        f"ssl={value.split('=', 1)[1]}" if value.startswith("sslmode=") else value
+        for value in query.split("&")
+    ]
+    return f"{base}?{'&'.join(parts)}"
 
 
 def create_engine(settings: Settings | None = None, *, url: str | None = None) -> AsyncEngine:

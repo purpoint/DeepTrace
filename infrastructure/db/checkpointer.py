@@ -45,8 +45,26 @@ def psycopg_url(url: str) -> str:
     """
     for prefix in ("postgresql+asyncpg://", "postgresql+psycopg://", "postgres://"):
         if url.startswith(prefix):
-            return "postgresql://" + url[len(prefix) :]
-    return url
+            return _libpq_ssl("postgresql://" + url[len(prefix) :])
+    return _libpq_ssl(url)
+
+
+def _libpq_ssl(url: str) -> str:
+    """Rename ``ssl`` back to ``sslmode``, which is what libpq reads.
+
+    The mirror of `_asyncpg_ssl`. One URL is configured and two drivers read
+    it, and they disagree about the name of this one parameter -- so whichever
+    spelling the operator was given, each driver sees its own.
+    """
+    base, separator, query = url.partition("?")
+    if not separator:
+        return url
+
+    parts = [
+        f"sslmode={value.split('=', 1)[1]}" if value.startswith("ssl=") else value
+        for value in query.split("&")
+    ]
+    return f"{base}?{'&'.join(parts)}"
 
 
 @asynccontextmanager
