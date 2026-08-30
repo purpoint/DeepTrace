@@ -23,28 +23,37 @@ const FILTERS = [
 function Claim({ claim }: { claim: ClaimView }) {
   return (
     <li className="py-4">
+      {/* Every block below is held to a reading measure. Unconstrained, this
+          panel ran to a median of 99 characters a line and a maximum of 160 --
+          the reasoning is `text-xs`, so the full width of the card buys it far
+          more characters than the claim above it. "The claims view is dense"
+          was recorded as a content problem; most of it was line length.
+
+          In `ch` per element rather than one width on the row, because the
+          blocks are set at different sizes and a single pixel width would give
+          each of them a different number of characters. */}
       <div className="flex items-start justify-between gap-4">
         {/* Text, always. A claim is model output over pages we do not control. */}
-        <p className="text-sm leading-6 text-ink">{claim.text}</p>
+        <p className="max-w-[58ch] text-sm leading-6 text-ink">{claim.text}</p>
         <StatusBadge status={claim.status} />
       </div>
 
       {claim.condition ? (
-        <p className="mt-1.5 text-xs text-muted">Holds when: {claim.condition}</p>
+        <p className="mt-1.5 max-w-[64ch] text-xs text-muted">Holds when: {claim.condition}</p>
       ) : null}
 
       {claim.reasoning ? (
-        <p className="mt-2 text-xs leading-5 text-faint">{claim.reasoning}</p>
+        <p className="mt-2 max-w-[64ch] text-xs leading-5 text-faint">{claim.reasoning}</p>
       ) : null}
 
       {claim.overgeneralization ? (
-        <p className="mt-2.5 rounded-lg bg-verdict-partial/10 px-2.5 py-1.5 text-xs text-verdict-partial">
+        <p className="mt-2.5 max-w-[64ch] rounded-lg bg-verdict-partial/10 px-2.5 py-1.5 text-xs text-verdict-partial">
           Reaches past its evidence: {claim.overgeneralization}
         </p>
       ) : null}
 
       {claim.suggested_revision ? (
-        <p className="mt-2 rounded-lg bg-raised px-2.5 py-1.5 text-xs text-muted">
+        <p className="mt-2 max-w-[64ch] rounded-lg bg-raised px-2.5 py-1.5 text-xs text-muted">
           Within the evidence: {claim.suggested_revision}
         </p>
       ) : null}

@@ -24,7 +24,12 @@
 
   --ink: 15 23 42;
   --muted: 71 85 105;
-  --faint: 148 163 184;
+  /* Darkened from 148 163 184, which measured 2.46:1 against this canvas --
+     well under the 4.5:1 WCAG asks of body text, and applied to the reasoning
+     and the metadata on every dense screen. 4.57:1 now, and still clearly
+     quieter than --muted at 7.27:1, so the hierarchy the three tokens exist
+     for survives. */
+  --faint: 100 116 139;
 
   --brand: 8 145 178;
   --brand-soft: 236 254 255;
@@ -48,7 +53,9 @@
 
   --ink: 226 232 240;
   --muted: 148 163 184;
-  --faint: 100 116 139;
+  /* Lightened from 100 116 139, which measured 4.14:1 -- under 4.5:1 here too,
+     though nothing like as far under as the light theme was. 5.69:1 now. */
+  --faint: 124 139 162;
 
   /* Brighter and less saturated than the light-mode brand. A colour tuned for
      white will look dull and muddy on near-black; the same hex is not the same
