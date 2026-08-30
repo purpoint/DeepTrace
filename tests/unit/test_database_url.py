@@ -20,7 +20,11 @@ from infrastructure.db.engine import normalise_database_url
 
 pytestmark = pytest.mark.unit
 
-MANAGED = "postgresql://u:p@ep-x.us-east-2.aws.neon.tech/neondb?sslmode=require"
+MANAGED = (
+    "postgresql://u:p@ep-x.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+)
+"""A Neon connection string, verbatim in shape. Both parameters are libpq's
+and asyncpg rejects both, one deploy at a time."""
 
 
 class TestTheDriverGetsItsOwnSpelling:
@@ -29,13 +33,23 @@ class TestTheDriverGetsItsOwnSpelling:
             "postgresql+asyncpg://u:p@ep-x.us-east-2.aws.neon.tech/neondb?ssl=require"
         )
 
+    def test_asyncpg_does_not_receive_what_it_cannot_take(self) -> None:
+        """`channel_binding` has no asyncpg equivalent, so it is dropped rather
+        than renamed. Fixing `sslmode` alone left this one to be discovered by
+        the next deploy, which is the reason the whole family is handled at
+        once rather than one parameter per failure."""
+        assert "channel_binding" not in normalise_database_url(MANAGED)
+
+    def test_psycopg_keeps_channel_binding(self) -> None:
+        """It reads the raw setting, not the asyncpg rewrite, so the reduction
+        is confined to one driver's connection."""
+        assert "channel_binding=require" in psycopg_url(MANAGED)
+
     def test_psycopg_is_given_sslmode(self) -> None:
         """Including when the URL has already been through the asyncpg
-        rewrite, which is how the checkpointer actually receives it."""
-        assert psycopg_url(normalise_database_url(MANAGED)) == MANAGED
-
-    def test_a_round_trip_returns_what_the_provider_gave(self) -> None:
-        assert psycopg_url(normalise_database_url(MANAGED)) == MANAGED
+        rewrite, which is how a caller passing an explicit url reaches it."""
+        assert "sslmode=require" in psycopg_url(normalise_database_url(MANAGED))
+        assert "ssl=require" not in psycopg_url(normalise_database_url(MANAGED))
 
     @pytest.mark.parametrize("mode", ["require", "verify-full", "disable", "prefer"])
     def test_the_value_is_carried_across_unchanged(self, mode: str) -> None:
@@ -48,14 +62,20 @@ class TestTheDriverGetsItsOwnSpelling:
 
 
 class TestNothingElseIsDisturbed:
-    def test_other_parameters_survive(self) -> None:
-        url = "postgresql://u:p@h/db?sslmode=require&application_name=deeptrace&connect_timeout=10"
+    def test_a_parameter_with_no_asyncpg_quarrel_survives(self) -> None:
+        url = "postgresql://u:p@h/db?sslmode=require&application_name=deeptrace"
         rewritten = normalise_database_url(url)
 
         assert "application_name=deeptrace" in rewritten
-        assert "connect_timeout=10" in rewritten
         assert "ssl=require" in rewritten
         assert "sslmode" not in rewritten
+
+    def test_connect_timeout_is_renamed_rather_than_dropped(self) -> None:
+        """asyncpg spells it `timeout`. Dropping it would silently remove a
+        ceiling somebody set on purpose."""
+        rewritten = normalise_database_url("postgresql://u:p@h/db?connect_timeout=10")
+
+        assert rewritten.endswith("?timeout=10")
 
     def test_a_url_with_no_query_is_untouched(self) -> None:
         assert normalise_database_url("postgresql://u:p@h/db") == "postgresql+asyncpg://u:p@h/db"

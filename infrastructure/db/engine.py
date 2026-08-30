@@ -58,21 +58,50 @@ def normalise_database_url(url: str) -> str:
         if url.startswith(prefix):
             if replacement is not None:
                 url = url.replace(prefix, replacement, 1)
-            return _asyncpg_ssl(url)
+            return _for_asyncpg(url)
     return url
 
 
-def _asyncpg_ssl(url: str) -> str:
-    """Rename ``sslmode`` to ``ssl``, leaving every other parameter alone."""
+#: libpq parameters asyncpg spells differently. Renamed, never reinterpreted.
+_RENAMED_FOR_ASYNCPG = {"sslmode": "ssl", "connect_timeout": "timeout"}
+
+#: libpq parameters asyncpg has no equivalent for, and rejects by name.
+#:
+#: Dropped rather than translated, because there is nothing to translate them
+#: to. `channel_binding` is the one that matters: Neon puts it in every
+#: connection string, and it asks the server to prove it is the same peer that
+#: terminated TLS. Removing it from *this* URL loses that for the asyncpg
+#: connection and nothing else -- the checkpointer reads the raw setting and
+#: keeps it -- and `ssl` still requires an encrypted connection either way. It
+#: is a real if narrow reduction, which is why it is written down here rather
+#: than filtered silently.
+_DROPPED_FOR_ASYNCPG = frozenset({"channel_binding", "gssencmode", "sslrootcert", "options"})
+
+
+def _for_asyncpg(url: str) -> str:
+    """Make a managed provider's query string one asyncpg will accept.
+
+    Every managed Postgres hands out a libpq connection string, because libpq
+    is what psql uses. asyncpg takes keyword arguments instead, and refuses
+    anything it does not recognise by name -- so the failure is
+    ``TypeError: connect() got an unexpected keyword argument 'channel_binding'``,
+    one parameter at a time, each discovered by a deploy.
+
+    Translating the whole family at once is the point. Fixing `sslmode` alone
+    left `channel_binding` to be found the same slow way.
+    """
     base, separator, query = url.partition("?")
     if not separator:
         return url
 
-    parts = [
-        f"ssl={value.split('=', 1)[1]}" if value.startswith("sslmode=") else value
-        for value in query.split("&")
-    ]
-    return f"{base}?{'&'.join(parts)}"
+    kept: list[str] = []
+    for parameter in query.split("&"):
+        name, _, value = parameter.partition("=")
+        if name in _DROPPED_FOR_ASYNCPG:
+            continue
+        kept.append(f"{_RENAMED_FOR_ASYNCPG.get(name, name)}={value}" if value else name)
+
+    return f"{base}?{'&'.join(kept)}" if kept else base
 
 
 def create_engine(settings: Settings | None = None, *, url: str | None = None) -> AsyncEngine:
