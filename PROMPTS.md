@@ -12,9 +12,9 @@ prompt nobody can version, diff, or attribute a regression to.
 ## The registry
 
 ```python
-registry.get("reporter", "v1")     # → Prompt
-registry.ids()                     # → every registered id
-registry.versions("reporter")      # → every version of one
+registry.get("reporter", "v1")  # → Prompt
+registry.ids()  # → every registered id
+registry.versions("reporter")  # → every version of one
 ```
 
 A `Prompt` carries its `system` text, a `user_template` with `$variables`, the
