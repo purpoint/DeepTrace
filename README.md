@@ -107,7 +107,8 @@ three, so the rest is a matter of days rather than of code. No benchmark number
 is claimed before it is recorded.
 
 Running it in containers, with TLS and file-based secrets, is in
-[DEPLOYMENT.md](DEPLOYMENT.md).
+[DEPLOYMENT.md](DEPLOYMENT.md) — which also covers the deployed instance on
+Render, and what a free tier costs the design.
 
 ---
 

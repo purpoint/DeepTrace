@@ -38,11 +38,31 @@ report, and a WebSocket that connected and replayed the run's first event.
 Running it the first time found **ten defects**, three latent since M24. The
 container stack had never worked, and nothing said so because nothing had tried.
 
-**The Render and Vercel split below is in exactly that state now.**
-`render.yaml`, `apps/web/vercel.json` and `scripts/serve-with-worker.sh` are
-written, parsed and type-checked; nothing has deployed them. Treat that section
-as untested -- including its instructions -- and expect it to be wrong in ways
-this paragraph cannot predict.
+**The Render half of the split is deployed and verified**, on 2026-08-30, at
+`deeptrace-api-ot29.onrender.com`: `/health` reporting database and queue
+connected, an account registered through the open endpoint, a signed-in
+research run that completed with 9 sources, 34 verified passages and 13 claims,
+and a report carrying 30 citations across 17 inline markers.
+
+Two things that answers questions this file could only guess at before. **The
+worker survives beside the API in 512 MB** -- the compromise in
+`scripts/serve-with-worker.sh` holds under a real run, which is the thing most
+likely not to. And the grouped-citation fix from `0a7eac8` is visible in the
+output: markers like `[1, 2, 3, 4, 5]` are parsed and validated, where before
+they would have passed through unchecked with the report still calling itself
+fully cited.
+
+Getting there took five failed deploys. In order: a `COPY` of a path
+`.dockerignore` excluded; then three separate resources still suspended from an
+earlier attempt, each surfacing only once the one before it was fixed. Only the
+first was a defect in this repository. The rest were the platform's state, and
+the lesson is that **the error message named the cause in none of the five
+cases** -- an eleven-second "exited with status 1", and a `socket.gaierror` for
+a database that was merely asleep.
+
+**The Vercel half has not been deployed.** `apps/web/vercel.json` and
+`VITE_API_ORIGIN` are written and type-checked and nothing has run them, which
+is the state the Render half was in before it produced five failures.
 
 ---
 
@@ -223,8 +243,11 @@ checkpoint -- but **nothing wakes the service on the queue's behalf**, so it
 waits for a visitor. The durability the project built is what makes this
 survivable rather than data loss.
 
-A free database also expires after some months. The demo will die quietly, and
-it will look like a bug rather than a plan.
+A free database expires **thirty days after it is created** -- not the several
+months this file first claimed. The instance provisioned on 2026-08-30 is dated
+to be deleted on **2026-09-28**, and deleted is the word Render uses: not
+paused, not archived. The demo stops working on a date nobody remembers, in a
+way that will read as a bug.
 
 `scripts/serve-with-worker.sh` exits if *either* process stops, so the platform
 restarts the container. A worker that has quietly died inside a healthy-looking
