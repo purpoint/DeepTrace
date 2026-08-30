@@ -16,6 +16,7 @@ import { useState } from "react";
 import { useSession } from "../auth";
 import { ApiError } from "../api/client";
 import { Logo } from "../components/Logo";
+import { TraceChain } from "../components/TraceChain";
 import { Failure } from "../components/ui";
 import { ThemeToggle } from "../theme";
 
@@ -62,10 +63,37 @@ export function SignIn() {
         <ThemeToggle />
       </div>
 
-      <div className="relative mx-auto flex max-w-sm flex-col justify-center px-6 py-24">
+      {/* `min-h-screen` here, not only on the wrapper. Centring needs a height
+          to centre within: the previous `justify-center` sat on an element
+          sized by its own content, so it did nothing and the padding alone
+          decided where the card landed -- against the top of the page. */}
+      <div className="relative mx-auto flex min-h-screen max-w-5xl flex-col justify-center gap-14 px-6 py-16 lg:flex-row lg:items-center lg:gap-20">
+        {/* What the visitor came to find out. Someone arriving at a bare
+            sign-in form cannot tell this from any other chat interface, and
+            cannot see anything at all without making an account first. */}
+        <section className="lg:flex-1">
+          <div className="animate-fade-up">
+            <Logo className="h-7 w-7 lg:hidden" />
+            <h2 className="mt-5 text-2xl font-semibold tracking-tight text-ink lg:mt-0 lg:text-3xl">
+              Answers you can check.
+            </h2>
+            <p className="mt-3 max-w-md text-sm leading-6 text-muted">
+              DeepTrace researches a question, then shows its work. Every sentence
+              traces to a quotation, and every quotation is matched against the
+              page it came from — so a citation that was never on the page is
+              removed before you read it.
+            </p>
+          </div>
+
+          <div className="mt-9 rounded-2xl border border-line bg-surface/60 p-6">
+            <TraceChain />
+          </div>
+        </section>
+
+        <section className="w-full lg:w-[22rem] lg:flex-none">
         <div className="animate-fade-up">
-          <Logo className="h-7 w-7" />
-          <h1 className="mt-5 text-2xl font-semibold tracking-tight text-ink">
+          <Logo className="hidden h-7 w-7 lg:block" />
+          <h1 className="mt-5 text-2xl font-semibold tracking-tight text-ink lg:mt-4">
             {registering ? "Create an account" : "Sign in to DeepTrace"}
           </h1>
           <p className="mt-2 text-sm leading-6 text-muted">
@@ -157,6 +185,7 @@ export function SignIn() {
             {registering ? "Sign in" : "Create one"}
           </button>
         </p>
+        </section>
       </div>
     </div>
   );
