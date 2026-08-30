@@ -4,7 +4,8 @@ import { Link } from "react-router-dom";
 
 import { useHistory } from "../api/hooks";
 import { SummaryCardTrigger } from "../components/SummaryCard";
-import { Empty, Failure, Panel, Spinner, relativeTime } from "../components/ui";
+import { Logo } from "../components/Logo";
+import { Failure, Panel, Spinner, relativeTime } from "../components/ui";
 
 const STATUS_COLOUR: Record<string, string> = {
   completed: "text-verdict-supported",
@@ -15,6 +16,35 @@ const STATUS_COLOUR: Record<string, string> = {
 export function History() {
   const history = useHistory(50);
 
+  // The empty case gets its own screen rather than a line of grey text inside
+  // a panel. A first visit here is a page reporting an absence and offering
+  // nothing to do about it -- which wastes the one moment the reader has
+  // nothing else competing for their attention. It says what will appear here
+  // and points at the one action that makes it appear.
+  if (history.data?.length === 0) {
+    return (
+      <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-5xl flex-col justify-center px-6 py-10">
+        <div className="mx-auto max-w-sm animate-fade-up text-center">
+          <Logo className="mx-auto h-8 w-8 opacity-60" />
+          <h1 className="mt-5 text-xl font-semibold tracking-tight text-ink">
+            No research yet
+          </h1>
+          <p className="mt-2.5 text-sm leading-6 text-muted">
+            Every run you start appears here — the question, what it established,
+            and every source behind it, kept for as long as you want it.
+          </p>
+          <Link
+            to="/"
+            className="group mt-7 inline-flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-medium text-canvas shadow-sm transition-all hover:brightness-110 hover:shadow-brand/20"
+          >
+            Ask your first question
+            <span className="transition-transform group-hover:translate-x-0.5">→</span>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto max-w-5xl animate-fade-up px-6 py-10">
       {/* "Every question that has been asked" was true when there was one
@@ -24,8 +54,6 @@ export function History() {
       <Panel title="Your research" subtitle="Every question you have asked">
         {history.isLoading ? <Spinner label="Loading…" /> : null}
         {history.error ? <Failure message="Could not load the history." /> : null}
-        {history.data?.length === 0 ? <Empty>You have not researched anything yet.</Empty> : null}
-
         <ul className="divide-y divide-line">
           {(history.data ?? []).map((run) => (
             <li key={run.research_id}>
