@@ -165,6 +165,10 @@ export function App() {
           <Route path="/" element={<Ask />} />
           <Route path="/history" element={<History />} />
           <Route path="/research/:researchId" element={<Workspace />} />
+          {/* The tab is a path segment, so a view of a run has an address that
+              can be sent to somebody. Without a tab the workspace redirects to
+              whichever one suits the run's state. */}
+          <Route path="/research/:researchId/:tab" element={<Workspace />} />
         </Routes>
       </main>
     </div>

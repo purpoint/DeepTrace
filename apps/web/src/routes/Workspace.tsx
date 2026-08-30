@@ -10,10 +10,17 @@
  * because that is what was asked for; a running one opens on progress, because
  * there is nothing else yet and a user watching an empty report page assumes
  * something is broken.
+ *
+ * **The tab is in the URL.** It was component state, which meant every view of
+ * a run had the same address: a reader who found the passage behind a sentence
+ * could not send anyone to it, the back button left the run entirely rather
+ * than stepping back a tab, and a reload always returned to the default. For a
+ * tool whose whole argument is "here is the working", the working was the one
+ * thing that could not be linked to.
  */
 
-import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useEffect } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { useResearch } from "../api/hooks";
 import { ApiError } from "../api/client";
@@ -26,13 +33,22 @@ import { Sources } from "./Sources";
 import { Cost } from "./Cost";
 import { Trace } from "./Trace";
 
-type Tab = "progress" | "report" | "claims" | "evidence" | "sources" | "trace" | "cost";
+const TABS = ["progress", "report", "claims", "evidence", "sources", "trace", "cost"] as const;
+
+type Tab = (typeof TABS)[number];
+
+/** Whether a path segment names a tab, so an invented one falls back to the
+ *  default rather than rendering an empty panel. */
+function asTab(value: string | undefined): Tab | null {
+  return TABS.includes(value as Tab) ? (value as Tab) : null;
+}
 
 const FINISHED = new Set(["completed", "failed", "cancelled", "partial"]);
 
 export function Workspace() {
-  const { researchId = "" } = useParams();
-  const [tab, setTab] = useState<Tab | null>(null);
+  const { researchId = "", tab: segment } = useParams();
+  const navigate = useNavigate();
+  const tab = asTab(segment);
 
   // Live progress is what a running run needs; polling is the fallback the
   // detail query uses when no socket is available.
@@ -42,11 +58,17 @@ export function Workspace() {
   const ready = Boolean(detail.data && detail.data.claims > 0);
 
   useEffect(() => {
-    // Chosen once, when the run's state is first known. Re-deciding on every
-    // render would drag a reader back to the report the moment a run finished
-    // while they were reading its trace.
-    if (tab === null && detail.data) setTab(finished ? "report" : "progress");
-  }, [detail.data, finished, tab]);
+    // Chosen once, when the run's state is first known, and then written into
+    // the URL. Re-deciding on every render would drag a reader back to the
+    // report the moment a run finished while they were reading its trace --
+    // and once the address names a tab this cannot fire again.
+    //
+    // `replace`, so arriving at /research/:id and being sent to its report
+    // does not leave a history entry that goes straight back to the redirect.
+    if (tab === null && detail.data) {
+      navigate(`/research/${researchId}/${finished ? "report" : "progress"}`, { replace: true });
+    }
+  }, [detail.data, finished, tab, researchId, navigate]);
 
   if (detail.isLoading) return <Spinner label="Loading…" />;
   if (detail.error) {
@@ -119,9 +141,10 @@ export function Workspace() {
 
       <nav className="no-scrollbar mb-5 flex gap-1 overflow-x-auto border-b border-line">
         {tabs.map((entry) => (
-          <button
+          <Link
             key={entry.key}
-            onClick={() => setTab(entry.key)}
+            to={`/research/${researchId}/${entry.key}`}
+            aria-current={tab === entry.key ? "page" : undefined}
             className={`-mb-px shrink-0 border-b-2 px-3.5 py-2.5 text-sm transition-colors ${
               tab === entry.key
                 ? "border-brand font-medium text-ink"
@@ -138,7 +161,7 @@ export function Workspace() {
                 {entry.count}
               </span>
             ) : null}
-          </button>
+          </Link>
         ))}
       </nav>
 
