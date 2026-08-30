@@ -160,6 +160,71 @@ class TestExposure:
             assert value.endswith(":-}"), f"{name} is {value!r}, which is not an empty default"
 
 
+class TestTheVercelConfig:
+    """The static host serving the client in a split deployment.
+
+    Its headers have to say something different from nginx's, because the API
+    is no longer the page's own origin -- and getting that wrong fails only in
+    a browser, where no test here runs.
+    """
+
+    @pytest.fixture(scope="class")
+    def vercel(self) -> dict:
+        import json
+
+        return json.loads((ROOT / "apps/web/vercel.json").read_text())
+
+    def _csp(self, vercel: dict) -> str:
+        for block in vercel["headers"]:
+            for header in block["headers"]:
+                if header["key"] == "Content-Security-Policy":
+                    return str(header["value"])
+        raise AssertionError("no Content-Security-Policy")
+
+    def test_the_policy_allows_the_api_it_is_built_against(self, vercel: dict) -> None:
+        """`connect-src 'self'` -- which is exactly what nginx serves, and the
+        obvious thing to copy -- blocks every call in a split deployment,
+        because the API is a different origin. The page loads perfectly and
+        nothing works."""
+        connect = self._csp(vercel).split("connect-src")[1].split(";")[0]
+
+        assert "https://" in connect, "connect-src names no API host"
+        assert "wss://" in connect, (
+            "connect-src allows https but not wss, so REST works and the "
+            "progress stream is blocked -- which reads as a broken feature "
+            "rather than a policy"
+        )
+
+    def test_both_schemes_name_the_same_host(self, vercel: dict) -> None:
+        """A policy that permits one host over https and a different one over
+        wss is a typo that presents as an intermittent bug."""
+        connect = self._csp(vercel).split("connect-src")[1].split(";")[0]
+        hosts = {
+            token.split("://", 1)[1].rstrip("/")
+            for token in connect.split()
+            if "://" in token
+        }
+
+        assert len(hosts) == 1, f"connect-src names more than one host: {hosts}"
+
+    def test_it_is_otherwise_as_strict_as_the_nginx_policy(
+        self, vercel: dict, headers_snippet: str
+    ) -> None:
+        """Everything except connect-src should match what the containerised
+        deployment serves. A split is a reason to widen one directive, not the
+        others."""
+        csp = self._csp(vercel)
+
+        for directive in (
+            "default-src 'self'",
+            "script-src 'self'",
+            "frame-ancestors 'none'",
+            "base-uri 'self'",
+        ):
+            assert directive in csp, f"{directive} is missing"
+            assert directive in headers_snippet, f"{directive} is not what nginx serves"
+
+
 class TestTheRenderBlueprint:
     """The free-tier shape: one web service running both processes.
 

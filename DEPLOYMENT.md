@@ -287,23 +287,32 @@ render ssh deeptrace-api -- python -m core.cli users create you@example.com
 
 Or register through the sign-in screen, which is open.
 
-### The content-security policy is missing, deliberately
+### The content-security policy names the API, and had to wait for it
 
-The nginx configuration serves a CSP with `connect-src 'self'`. That exact
-policy would **block every API call** from a Vercel-hosted client, because the
-API is no longer `'self'`.
+`apps/web/vercel.json` shipped without a CSP at first, deliberately: the policy
+nginx serves has `connect-src 'self'`, and copying it here -- the obvious move --
+would **block every API call**, because the API is no longer `'self'`. A guessed
+backend host would have been worse than none.
 
-`apps/web/vercel.json` therefore ships the other security headers and no CSP,
-which is a real regression against the containerised deployment and is stated
-here rather than left to be noticed. To close it, add this to the `headers`
-block with your own backend host:
+So it was added once the host existed, and it is the one directive that differs
+from the containerised policy:
 
 ```
-{ "key": "Content-Security-Policy",
-  "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://YOUR-API.onrender.com wss://YOUR-API.onrender.com; frame-ancestors 'none'; base-uri 'self'" }
+connect-src 'self' https://deeptrace-api-ot29.onrender.com wss://deeptrace-api-ot29.onrender.com
 ```
 
-Both schemes are needed: `https:` for REST and `wss:` for the progress stream.
+**Both schemes, and this is the part worth checking.** `https:` covers the REST
+calls; `wss:` covers the progress stream. Allowing only the first produces a
+deployment where everything works except live progress -- which reads as a
+broken feature rather than as a policy, and is the failure a reader of this file
+is most likely to ship. Three tests hold it: that both schemes are present, that
+they name the same host, and that every other directive still matches what nginx
+serves, because a split deployment is a reason to widen one directive rather
+than all of them.
+
+Changing the API's URL means changing this line. They are two deployments that
+now have to move together, which is the cost the top of this section warned
+about.
 
 ---
 
